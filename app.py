@@ -1,60 +1,8 @@
 """
 ChurnGuard AI - Customer Churn Prediction (ANN)
 ================================================
-Single-file Flask application for Vercel (serverless). Runs a pre-trained
-ANN whose weights (extracted from ANN.pkl) are embedded below as plain
-NumPy arrays, and serves a premium, multi-theme analytics dashboard for
-predicting bank customer churn risk.
-
-Why no ANN.pkl / TensorFlow here:
-    Vercel's Python serverless functions have a hard 250MB deployment
-    size limit. TensorFlow alone is well over that, so it cannot be
-    deployed on Vercel. Instead, the trained kernel/bias values were
-    extracted once from ANN.pkl and are embedded directly below as
-    NumPy arrays; the forward pass (matmul + ReLU/sigmoid) is plain
-    NumPy. Verified to reproduce the original Keras model's output to
-    float32 precision. Only two files are needed: app.py and
-    requirements.txt (both tiny, well within Vercel's limit).
-
-Deploying on Vercel:
-    1. Put app.py and requirements.txt at your project root.
-    2. Add a vercel.json at the root with:
-       {
-         "builds": [{ "src": "app.py", "use": "@vercel/python" }],
-         "routes": [{ "src": "/(.*)", "dest": "app.py" }]
-       }
-    3. vercel --prod   (or connect the repo in the Vercel dashboard)
-
-Run locally:
-    pip install -r requirements.txt
-    python app.py
-Then open http://127.0.0.1:5000
-
-Model details (introspected from the original ANN.pkl):
-    Input  : 10 features -> [CreditScore, Geography, Gender, Age, Tenure,
-                              Balance, NumOfProducts, HasCrCard,
-                              IsActiveMember, EstimatedSalary]
-    Output : 1 neuron, sigmoid -> probability of churn (0-1)
-    Layers : Dense(8, relu) x2 -> Dense(7, relu) -> Dense(8, relu) ->
-             Dense(7, relu) -> Dense(1, sigmoid)
-
-IMPORTANT - about scaling:
-    The original pickle contained ONLY the trained network, not the
-    StandardScaler/LabelEncoder used at training time. To make
-    predictions meaningful, this app standardizes inputs using the
-    well-known population statistics of the classic "Churn_Modelling.csv"
-    bank-churn dataset (the dataset this exact architecture is almost
-    always trained on). If you have your original scaler's fitted
-    mean_/scale_ values, paste them into SCALER_MEANS / SCALER_STDS
-    below for exact-match predictions.
-
-NOTE on serverless statefulness:
-    Vercel serverless functions are stateless between cold starts - the
-    in-memory HISTORY list used for the dashboard will reset whenever a
-    new instance spins up (e.g. after inactivity). For a persistent demo
-    (recommended before taking screenshots), swap HISTORY for a small
-    external store (Vercel KV, a Postgres table, etc.) - not required
-    for local use or a single live screenshot session.
+Single-file Flask application for Vercel (serverless) with a full-width
+horizontal form layout and integrated analytics dashboard.
 """
 
 import os
@@ -71,8 +19,7 @@ PROJECT_NAME = "ChurnGuard AI"
 TAGLINE = "Customer Retention Intelligence, powered by a hand-trained ANN"
 
 # ---------------------------------------------------------------------------
-# Embedded trained weights (extracted from ANN.pkl). Each entry is one
-# Dense layer: kernel W (in_features x out_features), bias b, activation.
+# Embedded trained weights (extracted from ANN.pkl)
 # ---------------------------------------------------------------------------
 WEIGHTS = [
     {
@@ -107,48 +54,45 @@ WEIGHTS = [
     },
 ]
 
-# ---------------------------------------------------------------------------
-# Feature schema (order MUST match the order the network was trained on)
-# ---------------------------------------------------------------------------
 FEATURES = [
     dict(key="credit_score", label="Credit Score", section="Profile",
          kind="range", min=300, max=900, step=1, default=650, unit="",
          mean=650.53, std=96.65,
-         help="Bureau credit score. Lower scores often correlate with risk."),
+         help="Bureau credit score rating."),
     dict(key="geography", label="Geography", section="Profile",
          kind="select", options=[("0", "France"), ("1", "Germany"), ("2", "Spain")],
          default="0", mean=0.7462, std=0.8279,
-         help="Country the account is registered in."),
+         help="Country of registration."),
     dict(key="gender", label="Gender", section="Profile",
          kind="toggle2", options=[("0", "Female"), ("1", "Male")],
          default="0", mean=0.5457, std=0.4979,
-         help="As recorded on the account."),
+         help="Customer biological gender."),
     dict(key="age", label="Age", section="Profile",
          kind="range", min=18, max=92, step=1, default=35, unit=" yrs",
          mean=38.92, std=10.49,
-         help="Customer age in years."),
+         help="Current customer age."),
     dict(key="tenure", label="Tenure", section="Account",
          kind="range", min=0, max=10, step=1, default=5, unit=" yrs",
          mean=5.01, std=2.89,
-         help="Years as a bank customer."),
+         help="Years active as account holder."),
     dict(key="balance", label="Account Balance", section="Account",
          kind="number", min=0, max=250000, step=100, default=60000, unit="",
          mean=76485.89, std=62397.40,
-         help="Current balance held across products."),
+         help="Total current account balance."),
     dict(key="num_products", label="Number of Products", section="Account",
          kind="stepper", min=1, max=4, step=1, default=1, unit="",
          mean=1.53, std=0.582,
-         help="Bank products the customer holds (cards, loans, savings...)."),
+         help="Total held bank products."),
     dict(key="has_cr_card", label="Has Credit Card", section="Engagement",
          kind="toggle", default="1", mean=0.7055, std=0.4558,
-         help="Whether the customer holds a credit card with the bank."),
+         help="Active credit card on file."),
     dict(key="is_active_member", label="Active Member", section="Engagement",
          kind="toggle", default="1", mean=0.5151, std=0.4998,
-         help="Whether the customer is currently an engaged/active user."),
+         help="Engaged user status."),
     dict(key="estimated_salary", label="Estimated Salary", section="Engagement",
          kind="number", min=0, max=250000, step=100, default=100000, unit="",
          mean=100090.24, std=57510.49,
-         help="Estimated annual salary."),
+         help="Estimated annual income."),
 ]
 FEATURE_KEYS = [f["key"] for f in FEATURES]
 MEANS = np.array([f["mean"] for f in FEATURES], dtype="float64")
@@ -156,58 +100,35 @@ STDS = np.array([f["std"] for f in FEATURES], dtype="float64")
 
 SECTIONS = ["Profile", "Account", "Engagement"]
 
-# ---------------------------------------------------------------------------
-# Pure-NumPy forward pass (no TensorFlow needed - keeps the deployment
-# small enough for Vercel's serverless size limit)
-# ---------------------------------------------------------------------------
 def _relu(x):
     return np.maximum(0.0, x)
-
 
 def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
-
 _ACTIVATIONS = {"relu": _relu, "sigmoid": _sigmoid, "linear": lambda x: x}
 
-
 def run_network(x):
-    """x: (10,) float64 standardized input -> scalar churn probability."""
     for layer in WEIGHTS:
         x = x @ layer["W"] + layer["b"]
         x = _ACTIVATIONS[layer["act"]](x)
     return float(x[0])
 
-
-print(f"[{PROJECT_NAME}] Loaded {len(WEIGHTS)} embedded dense layers "
-      f"(input=10, output=1).")
-
-# Optional: if you have your original sklearn StandardScaler's fitted
-# mean_/scale_ values, paste them here to replace the approximate dataset
-# statistics used below for exact-match predictions.
-SCALER_MEANS = None  # e.g. np.array([...], dtype="float64")
-SCALER_STDS = None   # e.g. np.array([...], dtype="float64")
+SCALER_MEANS = None
+SCALER_STDS = None
 USING_REAL_SCALER = SCALER_MEANS is not None and SCALER_STDS is not None
 
-# ---------------------------------------------------------------------------
-# In-memory analytics store. NOTE: on Vercel serverless this resets
-# whenever a new function instance cold-starts (see module docstring).
-# ---------------------------------------------------------------------------
-HISTORY = []  # list of dicts: {id, ts, probability, risk, inputs}
-
+HISTORY = []
 
 def scale_vector(raw_vec):
-    """raw_vec: (10,) numpy array in original units -> standardized (10,)"""
     if USING_REAL_SCALER:
         return (raw_vec - SCALER_MEANS) / SCALER_STDS
     return (raw_vec - MEANS) / STDS
-
 
 def predict_proba(raw_vec):
     scaled = scale_vector(raw_vec).astype("float64")
     prob = run_network(scaled)
     return max(0.0, min(1.0, prob))
-
 
 def risk_bucket(prob):
     if prob < 0.30:
@@ -216,10 +137,7 @@ def risk_bucket(prob):
         return "Medium", "medium"
     return "High", "high"
 
-
 def parse_payload(payload):
-    """Turn incoming JSON {key: value} into an ordered raw numpy vector,
-    validating/clamping against each feature's declared range."""
     raw = np.zeros(len(FEATURES), dtype="float64")
     clean = {}
     for i, feat in enumerate(FEATURES):
@@ -234,12 +152,7 @@ def parse_payload(payload):
         clean[feat["key"]] = num
     return raw, clean
 
-
 def compute_impacts(raw_vec):
-    """Lightweight sensitivity analysis: perturb each feature by +1 std
-    (in raw units) holding others fixed, and measure the change in
-    predicted churn probability. This is a transparent proxy for feature
-    influence - NOT a SHAP/LIME value - useful for an interpretable demo."""
     base = predict_proba(raw_vec)
     impacts = []
     for i, feat in enumerate(FEATURES):
@@ -248,7 +161,7 @@ def compute_impacts(raw_vec):
         perturbed[i] += step
         if feat["kind"] in ("range", "number", "stepper"):
             perturbed[i] = max(feat.get("min", perturbed[i]),
-                                min(feat.get("max", perturbed[i]), perturbed[i]))
+                               min(feat.get("max", perturbed[i]), perturbed[i]))
         new_p = predict_proba(perturbed)
         impacts.append({
             "key": feat["key"],
@@ -261,16 +174,14 @@ def compute_impacts(raw_vec):
     impacts.sort(key=lambda x: abs(x["delta"]), reverse=True)
     return impacts, base
 
-
 def gen_id():
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-
 
 def dashboard_stats():
     total = len(HISTORY)
     if total == 0:
         return dict(total=0, churn_rate=0, avg_prob=0, high_risk=0,
-                     buckets=[0] * 10, recent=[])
+                    buckets=[0] * 10, recent=[])
     probs = [h["probability"] for h in HISTORY]
     high_risk = sum(1 for p in probs if p >= 0.60)
     churned_calls = sum(1 for p in probs if p >= 0.50)
@@ -288,10 +199,6 @@ def dashboard_stats():
         recent=recent,
     )
 
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
 @app.route("/")
 def index():
     return render_template_string(
@@ -302,7 +209,6 @@ def index():
         sections=SECTIONS,
         using_real_scaler=USING_REAL_SCALER,
     )
-
 
 @app.route("/api/predict", methods=["POST"])
 def api_predict():
@@ -329,21 +235,15 @@ def api_predict():
         stats=dashboard_stats(),
     ))
 
-
 @app.route("/api/stats")
 def api_stats():
     return jsonify(dashboard_stats())
-
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
     HISTORY.clear()
     return jsonify(dashboard_stats())
 
-
-# ---------------------------------------------------------------------------
-# Embedded HTML / CSS / JS (single-file, zero CDN dependencies)
-# ---------------------------------------------------------------------------
 PAGE_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="en">
@@ -357,7 +257,7 @@ PAGE_TEMPLATE = r"""
   --ease:cubic-bezier(.22,1,.36,1);
 }
 
-/* ---------- THEME: Midnight Gold (default) ---------- */
+/* Themes */
 html[data-theme="midnight"]{
   --bg-0:#0a0d13; --bg-1:#0f131b; --bg-2:#151a24;
   --glass:rgba(255,255,255,0.045); --glass-brd:rgba(255,255,255,0.09);
@@ -369,7 +269,6 @@ html[data-theme="midnight"]{
           radial-gradient(circle at 50% 100%, rgba(212,175,90,.06), transparent 55%);
   --font-display:Georgia,'Iowan Old Style','Palatino Linotype',serif;
 }
-/* ---------- THEME: Emerald Vault ---------- */
 html[data-theme="emerald"]{
   --bg-0:#071410; --bg-1:#0a1a15; --bg-2:#0f221c;
   --glass:rgba(160,255,210,0.045); --glass-brd:rgba(160,255,210,0.09);
@@ -381,7 +280,6 @@ html[data-theme="emerald"]{
           radial-gradient(circle at 50% 100%, rgba(52,211,153,.06), transparent 55%);
   --font-display:Georgia,'Iowan Old Style','Palatino Linotype',serif;
 }
-/* ---------- THEME: Royal Amethyst ---------- */
 html[data-theme="amethyst"]{
   --bg-0:#0f0a1a; --bg-1:#150e22; --bg-2:#1b122b;
   --glass:rgba(216,180,254,0.05); --glass-brd:rgba(216,180,254,0.10);
@@ -393,7 +291,6 @@ html[data-theme="amethyst"]{
           radial-gradient(circle at 50% 100%, rgba(168,85,247,.07), transparent 55%);
   --font-display:Georgia,'Iowan Old Style','Palatino Linotype',serif;
 }
-/* ---------- THEME: Arctic Ivory (light) ---------- */
 html[data-theme="ivory"]{
   --bg-0:#e7edf1; --bg-1:#eef2f5; --bg-2:#f5f7f9;
   --glass:rgba(255,255,255,0.55); --glass-brd:rgba(27,42,74,0.10);
@@ -409,9 +306,7 @@ html[data-theme="ivory"]{
 *{box-sizing:border-box;}
 html,body{margin:0;padding:0;}
 body{
-  background:
-    var(--mesh),
-    linear-gradient(180deg, var(--bg-0), var(--bg-1) 45%, var(--bg-0));
+  background: var(--mesh), linear-gradient(180deg, var(--bg-0), var(--bg-1) 45%, var(--bg-0));
   background-attachment:fixed;
   color:var(--text-hi);
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
@@ -419,66 +314,54 @@ body{
   -webkit-font-smoothing:antialiased;
   transition:background .5s var(--ease), color .5s var(--ease);
 }
-.wrap{max-width:1320px; margin:0 auto; padding:28px 24px 80px;}
+.wrap{max-width:1200px; margin:0 auto; padding:28px 24px 80px;}
 
-/* ---------- Top bar ---------- */
-.topbar{
-  display:flex; align-items:center; justify-content:space-between;
-  gap:16px; margin-bottom:30px; flex-wrap:wrap;
-}
+.topbar{display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:28px; flex-wrap:wrap;}
 .brand{display:flex; align-items:center; gap:12px;}
 .brand-mark{
   width:42px;height:42px;border-radius:12px;
   background:linear-gradient(135deg,var(--accent),var(--accent-2));
   display:flex;align-items:center;justify-content:center;
   box-shadow:0 6px 18px -6px rgba(0,0,0,.5);
-  flex-shrink:0;
 }
 .brand-mark svg{width:22px;height:22px;}
-.brand-text h1{
-  font-family:var(--font-display); font-weight:700;
-  font-size:22px; margin:0; letter-spacing:.2px; color:var(--text-hi);
-}
+.brand-text h1{font-family:var(--font-display); font-weight:700; font-size:22px; margin:0; color:var(--text-hi);}
 .brand-text p{margin:2px 0 0; font-size:12.5px; color:var(--text-mid);}
 
-.theme-switch{display:flex; gap:8px; background:var(--glass); border:1px solid var(--glass-brd);
-  padding:6px; border-radius:999px; backdrop-filter:blur(14px);}
-.theme-dot{
-  width:30px;height:30px;border-radius:50%; cursor:pointer; border:2px solid transparent;
-  position:relative; transition:transform .25s var(--ease), border-color .25s var(--ease);
-}
-.theme-dot:hover{transform:translateY(-2px) scale(1.06);}
+.theme-switch{display:flex; gap:8px; background:var(--glass); border:1px solid var(--glass-brd); padding:6px; border-radius:999px; backdrop-filter:blur(14px);}
+.theme-dot{width:30px;height:30px;border-radius:50%; cursor:pointer; border:2px solid transparent; transition:transform .25s var(--ease);}
+.theme-dot:hover{transform:scale(1.1);}
 .theme-dot.active{border-color:var(--text-hi);}
 .theme-dot[data-t="midnight"]{background:linear-gradient(135deg,#0f131b,#d4af5a);}
 .theme-dot[data-t="emerald"]{background:linear-gradient(135deg,#0a1a15,#34d399);}
 .theme-dot[data-t="amethyst"]{background:linear-gradient(135deg,#150e22,#a855f7);}
 .theme-dot[data-t="ivory"]{background:linear-gradient(135deg,#eef2f5,#1b2a4a);}
 
-/* ---------- Glass card base ---------- */
 .card{
   background:var(--glass); border:1px solid var(--glass-brd);
   border-radius:var(--radius-lg); backdrop-filter:blur(18px);
   box-shadow:0 20px 50px -30px rgba(0,0,0,.6);
-  transition:border-color .4s var(--ease), background .4s var(--ease);
+  padding:26px; margin-bottom:24px;
 }
 
-/* ---------- Layout grid ---------- */
-.grid{display:grid; grid-template-columns:1.15fr 1fr; gap:22px; align-items:start;}
-@media(max-width:920px){.grid{grid-template-columns:1fr;}}
+/* Horizontal Form Grid Layout */
+.form-card h2{font-family:var(--font-display); font-size:20px; margin:0 0 4px;}
+.form-card .sub{color:var(--text-mid); font-size:13px; margin:0 0 20px;}
 
-/* ---------- Form ---------- */
-.form-card{padding:26px 26px 22px;}
-.form-card h2{font-family:var(--font-display); font-size:18px; margin:0 0 4px; color:var(--text-hi);}
-.form-card .sub{color:var(--text-mid); font-size:12.5px; margin:0 0 18px;}
 .section-label{
-  font-size:11px; letter-spacing:1.4px; text-transform:uppercase; color:var(--accent);
-  margin:22px 0 10px; font-weight:700;
+  font-size:11.5px; letter-spacing:1.5px; text-transform:uppercase; color:var(--accent);
+  margin:20px 0 12px; font-weight:700; border-bottom:1px solid var(--glass-brd); padding-bottom:6px;
 }
-.section-label:first-of-type{margin-top:4px;}
-.field{margin-bottom:16px;}
+.section-label:first-of-type{margin-top:0;}
+
+.horizontal-fields{
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:18px 22px; margin-bottom:16px;
+}
+
+.field{display:flex; flex-direction:column; justify-content:space-between;}
 .field-head{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;}
-.field-head label{font-size:13.5px; color:var(--text-hi); font-weight:600;}
-.field-head .val{font-size:13px; color:var(--accent); font-variant-numeric:tabular-nums; font-weight:600;}
+.field-head label{font-size:13px; color:var(--text-hi); font-weight:600;}
+.field-head .val{font-size:12.5px; color:var(--accent); font-weight:600;}
 .field .help{font-size:11.5px; color:var(--text-low); margin-top:4px;}
 
 input[type="range"]{
@@ -487,182 +370,106 @@ input[type="range"]{
 }
 input[type="range"]::-webkit-slider-thumb{
   -webkit-appearance:none; width:18px; height:18px; border-radius:50%;
-  background:var(--text-hi); border:3px solid var(--accent);
-  box-shadow:0 2px 8px rgba(0,0,0,.4); cursor:pointer; transition:transform .15s var(--ease);
-}
-input[type="range"]::-webkit-slider-thumb:hover{transform:scale(1.15);}
-input[type="range"]::-moz-range-thumb{
-  width:18px; height:18px; border-radius:50%; background:var(--text-hi);
-  border:3px solid var(--accent); cursor:pointer;
+  background:var(--text-hi); border:3px solid var(--accent); cursor:pointer;
 }
 
-input[type="number"]{
-  width:100%; padding:10px 12px; border-radius:var(--radius-sm);
+input[type="number"], select{
+  width:100%; padding:9px 12px; border-radius:var(--radius-sm);
   border:1px solid var(--glass-brd); background:rgba(0,0,0,.15);
   color:var(--text-hi); font-size:13.5px; outline:none;
-  transition:border-color .2s var(--ease), box-shadow .2s var(--ease);
 }
-html[data-theme="ivory"] input[type="number"]{background:rgba(255,255,255,.6);}
-input[type="number"]:focus{border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);}
-
-select{
-  width:100%; padding:10px 12px; border-radius:var(--radius-sm);
-  border:1px solid var(--glass-brd); background:rgba(0,0,0,.15);
-  color:var(--text-hi); font-size:13.5px; outline:none; cursor:pointer;
-  appearance:none; -webkit-appearance:none;
-  background-image:linear-gradient(45deg,transparent 50%,var(--text-mid) 50%),linear-gradient(135deg,var(--text-mid) 50%,transparent 50%);
-  background-position:calc(100% - 18px) center, calc(100% - 13px) center;
-  background-size:5px 5px, 5px 5px; background-repeat:no-repeat;
-}
-html[data-theme="ivory"] select{background-color:rgba(255,255,255,.6);}
+html[data-theme="ivory"] input[type="number"], html[data-theme="ivory"] select{background:rgba(255,255,255,.6);}
 
 .seg{display:flex; border-radius:var(--radius-sm); overflow:hidden; border:1px solid var(--glass-brd);}
 .seg button{
-  flex:1; padding:9px 10px; background:rgba(0,0,0,.12); color:var(--text-mid);
-  border:none; font-size:13px; font-weight:600; cursor:pointer; transition:all .2s var(--ease);
+  flex:1; padding:8px; background:rgba(0,0,0,.12); color:var(--text-mid);
+  border:none; font-size:12.5px; font-weight:600; cursor:pointer;
 }
-html[data-theme="ivory"] .seg button{background:rgba(255,255,255,.5);}
 .seg button.active{background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:var(--accent-ink);}
 
-.toggle-row{display:flex; align-items:center; justify-content:space-between; padding:2px 0;}
-.switch{position:relative; width:46px; height:26px; flex-shrink:0;}
+.toggle-row{display:flex; align-items:center; justify-content:space-between; min-height:42px;}
+.switch{position:relative; width:44px; height:24px;}
 .switch input{opacity:0; width:0; height:0;}
 .slider-pill{
-  position:absolute; inset:0; background:rgba(0,0,0,.25); border-radius:999px; cursor:pointer;
-  transition:background .25s var(--ease); border:1px solid var(--glass-brd);
+  position:absolute; inset:0; background:rgba(0,0,0,.25); border-radius:999px; cursor:pointer; border:1px solid var(--glass-brd);
 }
 .slider-pill:before{
-  content:""; position:absolute; width:20px; height:20px; left:2px; top:2px;
-  background:var(--text-hi); border-radius:50%; transition:transform .25s var(--ease);
+  content:""; position:absolute; width:18px; height:18px; left:2px; top:2px;
+  background:var(--text-hi); border-radius:50%; transition:transform .2s var(--ease);
 }
 .switch input:checked + .slider-pill{background:linear-gradient(135deg,var(--accent),var(--accent-2));}
 .switch input:checked + .slider-pill:before{transform:translateX(20px);}
 
-.stepper{display:flex; align-items:center; gap:10px;}
+.stepper{display:flex; align-items:center; gap:8px;}
 .stepper button{
-  width:34px;height:34px;border-radius:50%; border:1px solid var(--glass-brd);
-  background:rgba(0,0,0,.15); color:var(--text-hi); font-size:16px; cursor:pointer;
-  display:flex; align-items:center; justify-content:center; transition:all .2s var(--ease);
+  width:32px;height:32px;border-radius:50%; border:1px solid var(--glass-brd);
+  background:rgba(0,0,0,.15); color:var(--text-hi); font-size:15px; cursor:pointer;
 }
-.stepper button:hover{background:var(--accent); color:var(--accent-ink); border-color:var(--accent);}
-.stepper .count{
-  flex:1; text-align:center; font-size:16px; font-weight:700; color:var(--text-hi);
-  font-variant-numeric:tabular-nums;
-}
+.stepper .count{flex:1; text-align:center; font-size:15px; font-weight:700;}
 
-.actions{display:flex; gap:12px; margin-top:22px;}
+.actions{display:flex; gap:12px; margin-top:20px; justify-content:flex-end;}
 .btn{
   border:none; border-radius:999px; font-weight:700; font-size:14px; cursor:pointer;
-  padding:13px 22px; display:inline-flex; align-items:center; justify-content:center; gap:8px;
-  transition:transform .2s var(--ease), box-shadow .2s var(--ease), filter .2s var(--ease);
-  position:relative; overflow:hidden;
+  padding:12px 26px; display:inline-flex; align-items:center; gap:8px; transition:transform .2s var(--ease);
 }
 .btn-primary{
-  flex:1; color:var(--accent-ink);
-  background:linear-gradient(135deg,var(--accent),var(--accent-2));
-  box-shadow:0 12px 30px -12px color-mix(in srgb, var(--accent) 70%, transparent);
+  color:var(--accent-ink); background:linear-gradient(135deg,var(--accent),var(--accent-2));
+  box-shadow:0 8px 24px -8px var(--accent);
 }
-.btn-primary:hover{transform:translateY(-2px); filter:brightness(1.06);}
-.btn-primary:active{transform:translateY(0);}
-.btn-primary .shine{
-  position:absolute; top:0; left:-60%; width:40%; height:100%;
-  background:linear-gradient(120deg, transparent, rgba(255,255,255,.55), transparent);
-  transform:skewX(-20deg); transition:left .7s var(--ease);
-}
-.btn-primary:hover .shine{left:130%;}
-.btn-ghost{
-  background:transparent; color:var(--text-mid); border:1px solid var(--glass-brd);
-}
-.btn-ghost:hover{color:var(--text-hi); border-color:var(--text-mid);}
-.btn[disabled]{opacity:.6; cursor:progress;}
+.btn-primary:hover{transform:translateY(-2px);}
+.btn-ghost{background:transparent; color:var(--text-mid); border:1px solid var(--glass-brd);}
 
-/* ---------- Result / gauge card ---------- */
-.result-card{padding:26px; display:flex; flex-direction:column; align-items:center; text-align:center;}
-.result-card h2{font-family:var(--font-display); font-size:18px; margin:0 0 2px;}
-.result-card .sub{color:var(--text-mid); font-size:12.5px; margin:0 0 6px;}
-.gauge-wrap{position:relative; width:240px; margin:10px auto 4px;}
-.gauge-num{
-  position:absolute; left:0; right:0; top:60%; transform:translateY(-50%);
-  font-family:var(--font-display); font-size:40px; font-weight:700; color:var(--text-hi);
-}
-.gauge-label{
-  position:absolute; left:0; right:0; top:82%;
-  font-size:12px; letter-spacing:1px; text-transform:uppercase; color:var(--text-mid);
-}
-.risk-pill{
-  display:inline-flex; align-items:center; gap:6px; padding:6px 14px; border-radius:999px;
-  font-size:12.5px; font-weight:700; margin-top:14px; letter-spacing:.3px;
-}
+/* Assessment Section */
+.result-grid{display:grid; grid-template-columns:300px 1fr; gap:24px; align-items:center;}
+@media(max-width:768px){.result-grid{grid-template-columns:1fr; text-align:center;}}
+.gauge-wrap{position:relative; width:220px; margin:0 auto;}
+.gauge-num{position:absolute; left:0; right:0; top:58%; transform:translateY(-50%); font-family:var(--font-display); font-size:36px; font-weight:700; text-align:center;}
+.gauge-label{position:absolute; left:0; right:0; top:80%; font-size:11px; text-transform:uppercase; color:var(--text-mid); text-align:center;}
+.risk-pill{display:inline-flex; align-items:center; gap:6px; padding:6px 14px; border-radius:999px; font-size:12px; font-weight:700; margin-top:10px;}
 .risk-pill.low{background:rgba(74,222,128,.15); color:var(--ok);}
 .risk-pill.medium{background:rgba(245,185,66,.15); color:var(--warn);}
 .risk-pill.high{background:rgba(242,102,74,.15); color:var(--bad);}
-.risk-pill .dot{width:7px;height:7px;border-radius:50%; background:currentColor;}
+.risk-pill .dot{width:6px;height:6px;border-radius:50%; background:currentColor;}
 
-.impacts{width:100%; margin-top:22px; text-align:left;}
-.impacts h3{font-size:11px; letter-spacing:1.4px; text-transform:uppercase; color:var(--text-mid); margin:0 0 12px;}
-.impact-row{margin-bottom:9px;}
-.impact-row .top{display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:4px;}
-.impact-row .top .name{color:var(--text-hi); font-weight:600;}
-.impact-row .top .delta{font-variant-numeric:tabular-nums; color:var(--text-mid);}
+.impacts h3{font-size:11.5px; letter-spacing:1px; text-transform:uppercase; color:var(--text-mid); margin:0 0 10px;}
+.impact-row{margin-bottom:8px;}
+.impact-row .top{display:flex; justify-content:space-between; font-size:12px; margin-bottom:3px;}
 .impact-track{height:6px; border-radius:6px; background:rgba(0,0,0,.2); overflow:hidden;}
-html[data-theme="ivory"] .impact-track{background:rgba(0,0,0,.08);}
-.impact-fill{height:100%; border-radius:6px; transition:width .6s var(--ease);}
+.impact-fill{height:100%; border-radius:6px; transition:width .5s var(--ease);}
 .impact-fill.up{background:linear-gradient(90deg,var(--bad),#ff9d80);}
 .impact-fill.down{background:linear-gradient(90deg,var(--ok),#8bf5b0);}
 
-.placeholder-note{color:var(--text-low); font-size:12.5px; margin-top:18px; line-height:1.6;}
-
-/* ---------- Dashboard ---------- */
-.dash{margin-top:30px;}
-.dash-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:16px; flex-wrap:wrap; gap:8px;}
-.dash-head h2{font-family:var(--font-display); font-size:19px; margin:0;}
-.dash-head .link-btn{background:none; border:none; color:var(--text-mid); font-size:12.5px; cursor:pointer; text-decoration:underline; text-underline-offset:3px;}
-.dash-head .link-btn:hover{color:var(--text-hi);}
-
-.stat-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:18px;}
+/* Stats Grid */
+.stat-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:20px;}
 @media(max-width:640px){.stat-grid{grid-template-columns:repeat(2,1fr);}}
-.stat-card{padding:18px 20px;}
-.stat-card .label{font-size:11px; letter-spacing:1px; text-transform:uppercase; color:var(--text-mid); margin-bottom:8px;}
-.stat-card .value{font-family:var(--font-display); font-size:28px; font-weight:700; color:var(--text-hi);}
-.stat-card .value span{font-size:15px; color:var(--text-mid); font-weight:400;}
+.stat-card{padding:16px 20px;}
+.stat-card .label{font-size:11px; text-transform:uppercase; color:var(--text-mid); margin-bottom:6px;}
+.stat-card .value{font-family:var(--font-display); font-size:26px; font-weight:700;}
 
 .dash-grid{display:grid; grid-template-columns:1.2fr 1fr; gap:18px;}
 @media(max-width:700px){.dash-grid{grid-template-columns:1fr;}}
-.panel{padding:22px;}
-.panel h3{font-size:13px; letter-spacing:.6px; margin:0 0 16px; color:var(--text-hi);}
-
-.hist-row{display:flex; align-items:flex-end; gap:6px; height:130px;}
-.hist-bar{flex:1; background:linear-gradient(180deg,var(--accent),var(--accent-2)); border-radius:5px 5px 2px 2px; min-height:3px; transition:height .5s var(--ease); position:relative;}
-.hist-labels{display:flex; gap:6px; margin-top:8px;}
+.hist-row{display:flex; align-items:flex-end; gap:6px; height:110px;}
+.hist-bar{flex:1; background:linear-gradient(180deg,var(--accent),var(--accent-2)); border-radius:4px 4px 2px 2px; min-height:3px; transition:height .4s var(--ease);}
+.hist-labels{display:flex; gap:6px; margin-top:6px;}
 .hist-labels span{flex:1; text-align:center; font-size:9.5px; color:var(--text-low);}
 
 table.recent{width:100%; border-collapse:collapse; font-size:12.5px;}
-table.recent th{text-align:left; color:var(--text-mid); font-weight:600; font-size:10.5px; letter-spacing:.6px; text-transform:uppercase; padding:0 8px 8px 0;}
-table.recent td{padding:8px 8px 8px 0; border-top:1px solid var(--glass-brd); color:var(--text-hi);}
-table.recent .badge{padding:3px 9px; border-radius:999px; font-size:11px; font-weight:700;}
+table.recent th{text-align:left; color:var(--text-mid); font-size:10px; text-transform:uppercase; padding:0 8px 8px 0;}
+table.recent td{padding:8px 8px 8px 0; border-top:1px solid var(--glass-brd);}
+table.recent .badge{padding:3px 8px; border-radius:999px; font-size:10.5px; font-weight:700;}
 table.recent .badge.low{background:rgba(74,222,128,.15); color:var(--ok);}
 table.recent .badge.medium{background:rgba(245,185,66,.15); color:var(--warn);}
 table.recent .badge.high{background:rgba(242,102,74,.15); color:var(--bad);}
-.empty-state{color:var(--text-low); font-size:12.5px; text-align:center; padding:24px 0;}
 
-footer{margin-top:40px; text-align:center; color:var(--text-low); font-size:11.5px; line-height:1.8;}
-footer b{color:var(--text-mid);}
-
-@media (prefers-reduced-motion: reduce){
-  *{animation:none !important; transition:none !important;}
-}
+footer{margin-top:30px; text-align:center; color:var(--text-low); font-size:11.5px;}
 </style>
 </head>
 <body data-theme="midnight">
 <div class="wrap">
-
   <div class="topbar">
     <div class="brand">
       <div class="brand-mark">
-        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M12 2L3 6v6c0 5 3.8 8.7 9 10 5.2-1.3 9-5 9-10V6l-9-4z" fill="var(--accent-ink)"/>
-          <path d="M8.5 12l2.3 2.3L16 9" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 2L3 6v6c0 5 3.8 8.7 9 10 5.2-1.3 9-5 9-10V6l-9-4z" fill="var(--accent-ink)"/><path d="M8.5 12l2.3 2.3L16 9" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </div>
       <div class="brand-text">
         <h1>{{ project_name }}</h1>
@@ -677,15 +484,14 @@ footer b{color:var(--text-mid);}
     </div>
   </div>
 
-  <div class="grid">
-    <!-- FORM -->
-    <div class="card form-card">
-      <h2>Customer Profile</h2>
-      <p class="sub">Enter account details to estimate churn probability.</p>
-
-      <form id="predictForm">
-        {% for sec in sections %}
-        <div class="section-label">{{ sec }}</div>
+  <!-- FULL-WIDTH HORIZONTAL FORM -->
+  <div class="card form-card">
+    <h2>Customer Profile Information</h2>
+    <p class="sub">Enter account and engagement metrics below to evaluate risk.</p>
+    <form id="predictForm">
+      {% for sec in sections %}
+      <div class="section-label">{{ sec }} Details</div>
+      <div class="horizontal-fields">
         {% for f in features if f.section == sec %}
           <div class="field" data-key="{{ f.key }}">
             {% if f.kind == "range" %}
@@ -722,8 +528,8 @@ footer b{color:var(--text-mid);}
             {% elif f.kind == "toggle" %}
               <div class="toggle-row">
                 <div>
-                  <label>{{ f.label }}</label>
-                  <div class="help" style="margin-top:2px;">{{ f.help }}</div>
+                  <div class="field-head" style="margin-bottom:0;"><label>{{ f.label }}</label></div>
+                  <div class="help">{{ f.help }}</div>
                 </div>
                 <label class="switch">
                   <input type="checkbox" id="in_{{ f.key }}" {% if f.default == "1" %}checked{% endif %}>
@@ -742,103 +548,86 @@ footer b{color:var(--text-mid);}
             {% endif %}
           </div>
         {% endfor %}
-        {% endfor %}
+      </div>
+      {% endfor %}
 
-        <div class="actions">
-          <button type="submit" class="btn btn-primary" id="predictBtn">
-            <span class="shine"></span>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M13 2L3 14h8l-1 8 11-14h-8l1-6z" fill="currentColor"/></svg>
-            Predict Churn Risk
-          </button>
-          <button type="button" class="btn btn-ghost" id="resetBtn">Reset</button>
+      <div class="actions">
+        <button type="button" class="btn btn-ghost" id="resetBtn">Reset</button>
+        <button type="submit" class="btn btn-primary" id="predictBtn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M13 2L3 14h8l-1 8 11-14h-8l1-6z" fill="currentColor"/></svg>
+          Run Churn Assessment
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- RESULT / GAUGE -->
+  <div class="card">
+    <div class="result-grid">
+      <div style="display:flex; flex-direction:column; align-items:center;">
+        <div class="gauge-wrap">
+          <svg id="gaugeSvg" viewBox="0 0 240 140" width="220" height="130"></svg>
+          <div class="gauge-num" id="gaugeNum">--%</div>
+          <div class="gauge-label" id="gaugeLbl">awaiting input</div>
         </div>
-      </form>
-    </div>
-
-    <!-- RESULT -->
-    <div class="card result-card">
-      <h2>Risk Assessment</h2>
-      <p class="sub">Live prediction from the ANN model</p>
-
-      <div class="gauge-wrap">
-        <svg id="gaugeSvg" viewBox="0 0 240 150" width="240" height="150"></svg>
-        <div class="gauge-num" id="gaugeNum">--%</div>
-        <div class="gauge-label" id="gaugeLbl">awaiting input</div>
+        <div class="risk-pill low" id="riskPill" style="visibility:hidden;">
+          <span class="dot"></span><span id="riskText">Low Risk</span>
+        </div>
       </div>
-
-      <div class="risk-pill low" id="riskPill" style="visibility:hidden;">
-        <span class="dot"></span><span id="riskText">Low Risk</span>
+      <div>
+        <div id="placeholderNote" style="color:var(--text-low); font-size:13px; line-height:1.6;">
+          Configure customer inputs and select <b>Run Churn Assessment</b> to calculate live model churn probability and see top sensitivity drivers.
+        </div>
+        <div class="impacts" id="impactsBlock" style="display:none;">
+          <h3>Top Sensitivity Influencers</h3>
+          <div id="impactsList"></div>
+        </div>
       </div>
-
-      <div class="impacts" id="impactsBlock" style="display:none;">
-        <h3>Top Sensitivity Factors</h3>
-        <div id="impactsList"></div>
-      </div>
-
-      <p class="placeholder-note" id="placeholderNote">
-        Fill in the customer profile and click <b>Predict Churn Risk</b> to see
-        the model's estimated probability, risk tier, and the factors the
-        prediction is most sensitive to.
-      </p>
     </div>
   </div>
 
-  <!-- DASHBOARD -->
-  <div class="dash">
-    <div class="dash-head">
-      <h2>Analytics Dashboard</h2>
-      <button class="link-btn" id="clearHistoryBtn">Clear history</button>
-    </div>
+  <!-- ANALYTICS DASHBOARD -->
+  <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:12px;">
+    <h2 style="font-family:var(--font-display); font-size:18px; margin:0;">In-Memory Run Telemetry</h2>
+    <button id="clearHistoryBtn" style="background:none; border:none; color:var(--text-mid); font-size:12px; cursor:pointer; text-decoration:underline;">Clear telemetry</button>
+  </div>
 
-    <div class="stat-grid">
-      <div class="card stat-card"><div class="label">Total Predictions</div><div class="value" id="statTotal">0</div></div>
-      <div class="card stat-card"><div class="label">Churn Rate</div><div class="value" id="statChurn">0<span>%</span></div></div>
-      <div class="card stat-card"><div class="label">Avg. Probability</div><div class="value" id="statAvg">0<span>%</span></div></div>
-      <div class="card stat-card"><div class="label">High Risk Customers</div><div class="value" id="statHigh">0</div></div>
-    </div>
+  <div class="stat-grid">
+    <div class="card stat-card"><div class="label">Total Runs</div><div class="value" id="statTotal">0</div></div>
+    <div class="card stat-card"><div class="label">Churn Rate</div><div class="value" id="statChurn">0<span>%</span></div></div>
+    <div class="card stat-card"><div class="label">Avg. Probability</div><div class="value" id="statAvg">0<span>%</span></div></div>
+    <div class="card stat-card"><div class="label">High Risk Alerts</div><div class="value" id="statHigh">0</div></div>
+  </div>
 
-    <div class="dash-grid">
-      <div class="card panel">
-        <h3>Probability Distribution</h3>
-        <div class="hist-row" id="histRow"></div>
-        <div class="hist-labels" id="histLabels"></div>
-      </div>
-      <div class="card panel">
-        <h3>Recent Predictions</h3>
-        <div id="recentWrap"><div class="empty-state">No predictions yet.</div></div>
-      </div>
+  <div class="dash-grid">
+    <div class="card" style="margin-bottom:0;">
+      <h3 style="font-size:12.5px; margin:0 0 14px; text-transform:uppercase; letter-spacing:.8px; color:var(--text-mid);">Probability Distribution</h3>
+      <div class="hist-row" id="histRow"></div>
+      <div class="hist-labels" id="histLabels"></div>
+    </div>
+    <div class="card" style="margin-bottom:0;">
+      <h3 style="font-size:12.5px; margin:0 0 14px; text-transform:uppercase; letter-spacing:.8px; color:var(--text-mid);">Recent Executions</h3>
+      <div id="recentWrap"><div style="color:var(--text-low); font-size:12px; text-align:center; padding:16px;">No recorded predictions yet.</div></div>
     </div>
   </div>
 
   <footer>
-    Model: Sequential ANN · Dense(8→8→7→8→7→1) · sigmoid output · 10 input features<br>
-    {% if using_real_scaler %}
-      Predictions use your original scaler statistics for exact-match scaling.
-    {% else %}
-      Predictions are standardized using approximate bank-churn dataset statistics
-      &mdash; paste your original scaler's mean_/scale_ values into SCALER_MEANS /
-      SCALER_STDS near the top of app.py for exact-match results.
-    {% endif %}
+    Model: Sequential ANN · Dense(8→8→7→8→7→1) · Sigmoid Output · 10 Features
   </footer>
 </div>
 
 <script>
-const FEATURE_KEYS = {{ features | map(attribute='key') | list | tojson }};
 const FEATURE_META = {{ features | tojson }};
 
-/* ---------------- Theme switching ---------------- */
 const themeSwitch = document.getElementById('themeSwitch');
 themeSwitch.addEventListener('click', (e) => {
   const dot = e.target.closest('.theme-dot');
   if(!dot) return;
   document.querySelectorAll('.theme-dot').forEach(d => d.classList.remove('active'));
   dot.classList.add('active');
-  document.body.setAttribute('data-theme', dot.dataset.t);
   document.documentElement.setAttribute('data-theme', dot.dataset.t);
 });
-document.documentElement.setAttribute('data-theme', 'midnight');
 
-/* ---------------- Field wiring ---------------- */
 FEATURE_META.forEach(f => {
   if(f.kind === 'range'){
     const el = document.getElementById('in_' + f.key);
@@ -885,44 +674,38 @@ function collectPayload(){
   return payload;
 }
 
-/* ---------------- Gauge ---------------- */
 function drawGauge(pct){
-  // semi-circle gauge, 240x150 viewbox, arc from 180deg to 0deg
   const svg = document.getElementById('gaugeSvg');
-  const cx = 120, cy = 120, r = 92;
+  const cx = 120, cy = 115, r = 85;
   const color = pct < 30 ? 'var(--ok)' : pct < 60 ? 'var(--warn)' : 'var(--bad)';
-  const startAngle = Math.PI;
   const endAngle = Math.PI - (pct/100)*Math.PI;
-  const polar = (ang) => [cx + r*Math.cos(ang), cy - r*Math.sin(ang)]; // note: y flips
+  const polar = (ang) => [cx + r*Math.cos(ang), cy - r*Math.sin(ang)];
   const trackStart = polar(Math.PI), trackEnd = polar(0);
   const valEnd = polar(endAngle);
   const largeArc = pct > 50 ? 1 : 0;
 
   svg.innerHTML = `
     <path d="M ${trackStart[0]} ${trackStart[1]} A ${r} ${r} 0 1 1 ${trackEnd[0]} ${trackEnd[1]}"
-          fill="none" stroke="rgba(120,120,140,0.18)" stroke-width="16" stroke-linecap="round"/>
+          fill="none" stroke="rgba(120,120,140,0.18)" stroke-width="14" stroke-linecap="round"/>
     <path d="M ${trackStart[0]} ${trackStart[1]} A ${r} ${r} 0 ${largeArc} 1 ${valEnd[0]} ${valEnd[1]}"
-          fill="none" stroke="${color}" stroke-width="16" stroke-linecap="round"
-          style="transition: d .6s var(--ease);"/>
-    <circle cx="${cx}" cy="${cy}" r="5" fill="${color}"/>
+          fill="none" stroke="${color}" stroke-width="14" stroke-linecap="round"/>
+    <circle cx="${cx}" cy="${cy}" r="4" fill="${color}"/>
   `;
   document.getElementById('gaugeNum').textContent = pct.toFixed(1) + '%';
   document.getElementById('gaugeNum').style.color = color;
   document.getElementById('gaugeLbl').textContent = 'churn probability';
 }
 
-/* ---------------- Predict ---------------- */
 const form = document.getElementById('predictForm');
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('predictBtn');
   btn.disabled = true;
-  const payload = collectPayload();
   try{
     const res = await fetch('/api/predict', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
+      body: JSON.stringify(collectPayload())
     });
     const data = await res.json();
     renderResult(data);
@@ -946,14 +729,14 @@ function renderResult(data){
   const impactsBlock = document.getElementById('impactsBlock');
   const list = document.getElementById('impactsList');
   list.innerHTML = '';
-  data.impacts.slice(0, 5).forEach(im => {
+  data.impacts.slice(0, 4).forEach(im => {
     const dir = im.delta >= 0 ? 'up' : 'down';
     const row = document.createElement('div');
     row.className = 'impact-row';
     row.innerHTML = `
       <div class="top">
-        <span class="name">${im.label}</span>
-        <span class="delta">${im.delta > 0 ? '+' : ''}${im.delta.toFixed(2)} pp</span>
+        <span>${im.label}</span>
+        <span>${im.delta > 0 ? '+' : ''}${im.delta.toFixed(2)} pp</span>
       </div>
       <div class="impact-track"><div class="impact-fill ${dir}" style="width:${im.pct}%"></div></div>
     `;
@@ -962,7 +745,6 @@ function renderResult(data){
   impactsBlock.style.display = 'block';
 }
 
-/* ---------------- Dashboard render ---------------- */
 function renderDashboard(stats){
   document.getElementById('statTotal').textContent = stats.total;
   document.getElementById('statChurn').innerHTML = stats.churn_rate + '<span>%</span>';
@@ -977,8 +759,7 @@ function renderDashboard(stats){
   stats.buckets.forEach((c, i) => {
     const bar = document.createElement('div');
     bar.className = 'hist-bar';
-    bar.style.height = Math.max(3, (c / maxCount) * 120) + 'px';
-    bar.title = (i*10) + '-' + (i*10+10) + '%: ' + c;
+    bar.style.height = Math.max(3, (c / maxCount) * 100) + 'px';
     histRow.appendChild(bar);
     const lbl = document.createElement('span');
     lbl.textContent = i % 2 === 0 ? (i*10) + '%' : '';
@@ -987,7 +768,7 @@ function renderDashboard(stats){
 
   const recentWrap = document.getElementById('recentWrap');
   if(stats.recent.length === 0){
-    recentWrap.innerHTML = '<div class="empty-state">No predictions yet.</div>';
+    recentWrap.innerHTML = '<div style="color:var(--text-low); font-size:12px; text-align:center; padding:16px;">No recorded predictions yet.</div>';
     return;
   }
   let rows = stats.recent.map(r => `
@@ -1006,19 +787,15 @@ function renderDashboard(stats){
 }
 
 document.getElementById('resetBtn').addEventListener('click', () => window.location.reload());
-
 document.getElementById('clearHistoryBtn').addEventListener('click', async () => {
   const res = await fetch('/api/reset', {method:'POST'});
   const stats = await res.json();
   renderDashboard(stats);
 });
 
-/* initial empty gauge */
 drawGauge(0);
 document.getElementById('gaugeNum').textContent = '--%';
 document.getElementById('gaugeLbl').textContent = 'awaiting input';
-
-/* initial dashboard load */
 fetch('/api/stats').then(r => r.json()).then(renderDashboard);
 </script>
 </body>
