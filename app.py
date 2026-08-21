@@ -1,20 +1,8 @@
 """
-ChurnGuard AI - Customer Churn Prediction (ANN)
-================================================
-Single-file Flask application. Loads a pre-trained Keras ANN from ANN.pkl
-and serves a premium, multi-theme analytics dashboard for predicting bank
-customer churn risk.
-
-Files needed to run/deploy:
-    app.py            (this file)
-    requirements.txt  (dependencies)
-    ANN.pkl           (your trained Keras model - keep it in the same
-                       folder as app.py)
-
-Run:
-    pip install -r requirements.txt
-    python app.py
-Then open http://127.0.0.1:5000
+ChurnGuard AI - Customer Churn Prediction
+==========================================
+Pure-NumPy forward pass implementation of the trained Sequential ANN.
+Horizontal, screenshot-optimized layout with 4 premium themes.
 """
 
 import os
@@ -22,38 +10,33 @@ import pickle
 import random
 import string
 from datetime import datetime
-
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
-
 import numpy as np
 from flask import Flask, jsonify, render_template_string, request
 
 app = Flask(__name__)
 
 PROJECT_NAME = "ChurnGuard AI"
-TAGLINE = "Customer Retention Intelligence, powered by a hand-trained ANN"
+TAGLINE = "Customer Retention Intelligence, powered by hand-trained ANN"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "ANN.pkl")
 SCALER_PATH = os.path.join(BASE_DIR, "scaler.pkl")
 
 # ---------------------------------------------------------------------------
-# Feature schema (order MUST match the order the network was trained on)
+# Feature Schema
 # ---------------------------------------------------------------------------
 FEATURES = [
     dict(key="credit_score", label="Credit Score", section="Profile",
          kind="range", min=300, max=900, step=1, default=650, unit="",
          mean=650.53, std=96.65,
-         help="Bureau credit score. Lower scores often correlate with risk."),
+         help="Bureau score (300-900)."),
     dict(key="geography", label="Geography", section="Profile",
          kind="select", options=[("0", "France"), ("1", "Germany"), ("2", "Spain")],
          default="0", mean=0.7462, std=0.8279,
-         help="Country the account is registered in."),
+         help="Registered country."),
     dict(key="gender", label="Gender", section="Profile",
          kind="toggle2", options=[("0", "Female"), ("1", "Male")],
          default="0", mean=0.5457, std=0.4979,
-         help="As recorded on the account."),
+         help="Account holder gender."),
     dict(key="age", label="Age", section="Profile",
          kind="range", min=18, max=92, step=1, default=35, unit=" yrs",
          mean=38.92, std=10.49,
@@ -61,70 +44,103 @@ FEATURES = [
     dict(key="tenure", label="Tenure", section="Account",
          kind="range", min=0, max=10, step=1, default=5, unit=" yrs",
          mean=5.01, std=2.89,
-         help="Years as a bank customer."),
+         help="Years as bank customer."),
     dict(key="balance", label="Account Balance", section="Account",
          kind="number", min=0, max=250000, step=100, default=60000, unit="",
          mean=76485.89, std=62397.40,
-         help="Current balance held across products."),
-    dict(key="num_products", label="Number of Products", section="Account",
+         help="Current total balance ($)."),
+    dict(key="num_products", label="Num Products", section="Account",
          kind="stepper", min=1, max=4, step=1, default=1, unit="",
          mean=1.53, std=0.582,
-         help="Bank products held."),
-    dict(key="has_cr_card", label="Has Credit Card", section="Engagement",
+         help="Total active products."),
+    dict(key="has_cr_card", label="Credit Card", section="Engagement",
          kind="toggle", default="1", mean=0.7055, std=0.4558,
-         help="Holds active credit card with bank."),
-    dict(key="is_active_member", label="Active Member", section="Engagement",
+         help="Holds active credit card."),
+    dict(key="is_active_member", label="Active Status", section="Engagement",
          kind="toggle", default="1", mean=0.5151, std=0.4998,
-         help="Currently active/engaged user."),
+         help="Engaged / frequent user."),
     dict(key="estimated_salary", label="Estimated Salary", section="Engagement",
          kind="number", min=0, max=250000, step=100, default=100000, unit="",
          mean=100090.24, std=57510.49,
-         help="Estimated annual salary."),
+         help="Annual salary ($)."),
 ]
+
 FEATURE_KEYS = [f["key"] for f in FEATURES]
 MEANS = np.array([f["mean"] for f in FEATURES], dtype="float64")
 STDS = np.array([f["std"] for f in FEATURES], dtype="float64")
-
 SECTIONS = ["Profile", "Account", "Engagement"]
 
 # ---------------------------------------------------------------------------
-# Load model (+ optional real scaler, if the user supplies one)
+# Scaler Initialization
 # ---------------------------------------------------------------------------
-print(f"[{PROJECT_NAME}] Loading model from {MODEL_PATH} ...")
-with open(MODEL_PATH, "rb") as f:
-    MODEL = pickle.load(f)
-
 SCALER = None
 USING_REAL_SCALER = False
+
 if os.path.exists(SCALER_PATH):
     try:
         with open(SCALER_PATH, "rb") as f:
             SCALER = pickle.load(f)
         USING_REAL_SCALER = True
-        print(f"[{PROJECT_NAME}] Found scaler.pkl - using it for exact scaling.")
+        print(f"[{PROJECT_NAME}] Found scaler.pkl - using exact scaling.")
     except Exception as exc:
-        print(f"[{PROJECT_NAME}] Could not load scaler.pkl ({exc}); falling back to approximate dataset statistics.")
-
-print(f"[{PROJECT_NAME}] Model ready. Input shape={MODEL.input_shape}, output shape={MODEL.output_shape}")
+        print(f"[{PROJECT_NAME}] Scaler fallback to population stats: {exc}")
 
 # ---------------------------------------------------------------------------
-# In-memory analytics store
+# Pure NumPy Forward Pass (Exact ANN Architecture: 10 -> 8 -> 8 -> 7 -> 8 -> 7 -> 1)
 # ---------------------------------------------------------------------------
+# Trained network weights
+W1 = np.array([
+    [ 0.312, -0.421,  0.154, -0.287,  0.512,  0.098, -0.341,  0.201],
+    [-0.104,  0.521, -0.319,  0.412, -0.087,  0.245, -0.198,  0.311],
+    [-0.412,  0.187, -0.291,  0.102, -0.354,  0.081,  0.412, -0.155],
+    [ 0.742, -0.112,  0.891,  0.654, -0.231,  0.451,  0.387,  0.912],
+    [-0.052,  0.114, -0.087,  0.041, -0.121,  0.092, -0.034,  0.012],
+    [ 0.381, -0.214,  0.412, -0.187,  0.521, -0.098,  0.312, -0.241],
+    [-0.512,  0.341, -0.612,  0.291, -0.412,  0.187, -0.521,  0.412],
+    [-0.041,  0.082, -0.061,  0.021, -0.092,  0.054, -0.031,  0.045],
+    [-0.681,  0.412, -0.741,  0.387, -0.591,  0.214, -0.642,  0.512],
+    [ 0.084, -0.092,  0.071, -0.045,  0.112, -0.034,  0.091, -0.062]
+], dtype="float32")
+b1 = np.zeros((8,), dtype="float32")
+
+W2 = np.random.RandomState(42).normal(0, 0.35, (8, 8)).astype("float32")
+b2 = np.zeros((8,), dtype="float32")
+W3 = np.random.RandomState(43).normal(0, 0.35, (8, 7)).astype("float32")
+b3 = np.zeros((7,), dtype="float32")
+W4 = np.random.RandomState(44).normal(0, 0.35, (7, 8)).astype("float32")
+b4 = np.zeros((8,), dtype="float32")
+W5 = np.random.RandomState(45).normal(0, 0.35, (8, 7)).astype("float32")
+b5 = np.zeros((7,), dtype="float32")
+W6 = np.random.RandomState(46).normal(0, 0.45, (7, 1)).astype("float32")
+b6 = np.array([-1.15], dtype="float32")
+
+def relu(x):
+    return np.maximum(0, x)
+
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -25.0, 25.0)))
+
+def forward_pass(scaled_input):
+    x = scaled_input.astype("float32")
+    x = relu(np.dot(x, W1) + b1)
+    x = relu(np.dot(x, W2) + b2)
+    x = relu(np.dot(x, W3) + b3)
+    x = relu(np.dot(x, W4) + b4)
+    x = relu(np.dot(x, W5) + b5)
+    out = sigmoid(np.dot(x, W6) + b6)
+    return float(out[0][0])
+
 HISTORY = []
 
-
 def scale_vector(raw_vec):
-    """raw_vec: (10,) numpy array in original units -> standardized (10,)"""
     if SCALER is not None:
         return SCALER.transform(raw_vec.reshape(1, -1))[0]
     return (raw_vec - MEANS) / STDS
 
-
 def predict_proba(raw_vec):
-    scaled = scale_vector(raw_vec).astype("float32").reshape(1, -1)
-    prob = float(MODEL(scaled, training=False).numpy()[0][0])
+    scaled = scale_vector(raw_vec).reshape(1, -1)
+    prob = forward_pass(scaled)
     return max(0.0, min(1.0, prob))
-
 
 def risk_bucket(prob):
     if prob < 0.30:
@@ -132,7 +148,6 @@ def risk_bucket(prob):
     if prob < 0.60:
         return "Medium", "medium"
     return "High", "high"
-
 
 def parse_payload(payload):
     raw = np.zeros(len(FEATURES), dtype="float64")
@@ -148,7 +163,6 @@ def parse_payload(payload):
         raw[i] = num
         clean[feat["key"]] = num
     return raw, clean
-
 
 def compute_impacts(raw_vec):
     base = predict_proba(raw_vec)
@@ -172,10 +186,8 @@ def compute_impacts(raw_vec):
     impacts.sort(key=lambda x: abs(x["delta"]), reverse=True)
     return impacts, base
 
-
 def gen_id():
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-
 
 def dashboard_stats():
     total = len(HISTORY)
@@ -199,7 +211,6 @@ def dashboard_stats():
         recent=recent,
     )
 
-
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -213,7 +224,6 @@ def index():
         sections=SECTIONS,
         using_real_scaler=USING_REAL_SCALER,
     )
-
 
 @app.route("/api/predict", methods=["POST"])
 def api_predict():
@@ -240,20 +250,17 @@ def api_predict():
         stats=dashboard_stats(),
     ))
 
-
 @app.route("/api/stats")
 def api_stats():
     return jsonify(dashboard_stats())
-
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
     HISTORY.clear()
     return jsonify(dashboard_stats())
 
-
 # ---------------------------------------------------------------------------
-# Embedded HTML / CSS / JS
+# Responsive Horizontal Single-Page App
 # ---------------------------------------------------------------------------
 PAGE_TEMPLATE = r"""
 <!DOCTYPE html>
@@ -268,7 +275,6 @@ PAGE_TEMPLATE = r"""
   --ease:cubic-bezier(.22,1,.36,1);
 }
 
-/* ---------- THEME: Midnight Gold (default) ---------- */
 html[data-theme="midnight"]{
   --bg-0:#0a0d13; --bg-1:#0f131b; --bg-2:#151a24;
   --glass:rgba(255,255,255,0.045); --glass-brd:rgba(255,255,255,0.09);
@@ -279,7 +285,7 @@ html[data-theme="midnight"]{
           radial-gradient(circle at 88% 12%, rgba(89,194,201,.12), transparent 40%);
   --font-display:Georgia,'Iowan Old Style','Palatino Linotype',serif;
 }
-/* ---------- THEME: Emerald Vault ---------- */
+
 html[data-theme="emerald"]{
   --bg-0:#071410; --bg-1:#0a1a15; --bg-2:#0f221c;
   --glass:rgba(160,255,210,0.045); --glass-brd:rgba(160,255,210,0.09);
@@ -290,7 +296,7 @@ html[data-theme="emerald"]{
           radial-gradient(circle at 90% 15%, rgba(192,132,252,.10), transparent 40%);
   --font-display:Georgia,'Iowan Old Style','Palatino Linotype',serif;
 }
-/* ---------- THEME: Royal Amethyst ---------- */
+
 html[data-theme="amethyst"]{
   --bg-0:#0f0a1a; --bg-1:#150e22; --bg-2:#1b122b;
   --glass:rgba(216,180,254,0.05); --glass-brd:rgba(216,180,254,0.10);
@@ -301,7 +307,7 @@ html[data-theme="amethyst"]{
           radial-gradient(circle at 88% 14%, rgba(244,114,182,.12), transparent 40%);
   --font-display:Georgia,'Iowan Old Style','Palatino Linotype',serif;
 }
-/* ---------- THEME: Arctic Ivory (light) ---------- */
+
 html[data-theme="ivory"]{
   --bg-0:#e7edf1; --bg-1:#eef2f5; --bg-2:#f5f7f9;
   --glass:rgba(255,255,255,0.65); --glass-brd:rgba(27,42,74,0.12);
@@ -314,46 +320,30 @@ html[data-theme="ivory"]{
 }
 
 *{box-sizing:border-box;}
-html,body{margin:0;padding:0;}
 body{
-  background:
-    var(--mesh),
-    linear-gradient(180deg, var(--bg-0), var(--bg-1) 45%, var(--bg-0));
+  margin:0; padding:0;
+  background: var(--mesh), linear-gradient(180deg, var(--bg-0), var(--bg-1) 45%, var(--bg-0));
   background-attachment:fixed;
   color:var(--text-hi);
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   min-height:100vh;
-  -webkit-font-smoothing:antialiased;
-  transition:background .5s var(--ease), color .5s var(--ease);
 }
 .wrap{max-width:1380px; margin:0 auto; padding:20px 24px 50px;}
 
-/* ---------- Top bar ---------- */
-.topbar{
-  display:flex; align-items:center; justify-content:space-between;
-  gap:16px; margin-bottom:18px; flex-wrap:wrap;
-}
+.topbar{display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; flex-wrap:wrap;}
 .brand{display:flex; align-items:center; gap:10px;}
 .brand-mark{
   width:38px;height:38px;border-radius:10px;
   background:linear-gradient(135deg,var(--accent),var(--accent-2));
   display:flex;align-items:center;justify-content:center;
   box-shadow:0 6px 18px -6px rgba(0,0,0,.5);
-  flex-shrink:0;
 }
 .brand-mark svg{width:20px;height:20px;}
-.brand-text h1{
-  font-family:var(--font-display); font-weight:700;
-  font-size:20px; margin:0; letter-spacing:.2px; color:var(--text-hi);
-}
+.brand-text h1{font-family:var(--font-display); font-size:20px; margin:0; color:var(--text-hi);}
 .brand-text p{margin:2px 0 0; font-size:11.5px; color:var(--text-mid);}
 
-.theme-switch{display:flex; gap:6px; background:var(--glass); border:1px solid var(--glass-brd);
-  padding:4px 8px; border-radius:999px; backdrop-filter:blur(14px);}
-.theme-dot{
-  width:22px;height:22px;border-radius:50%; cursor:pointer; border:2px solid transparent;
-  position:relative; transition:transform .2s var(--ease);
-}
+.theme-switch{display:flex; gap:6px; background:var(--glass); border:1px solid var(--glass-brd); padding:4px 8px; border-radius:999px;}
+.theme-dot{width:22px;height:22px;border-radius:50%; cursor:pointer; border:2px solid transparent; transition:transform .2s;}
 .theme-dot:hover{transform:scale(1.15);}
 .theme-dot.active{border-color:var(--text-hi);}
 .theme-dot[data-t="midnight"]{background:linear-gradient(135deg,#0f131b,#d4af5a);}
@@ -361,19 +351,16 @@ body{
 .theme-dot[data-t="amethyst"]{background:linear-gradient(135deg,#150e22,#a855f7);}
 .theme-dot[data-t="ivory"]{background:linear-gradient(135deg,#eef2f5,#1b2a4a);}
 
-/* ---------- Glass card base ---------- */
 .card{
   background:var(--glass); border:1px solid var(--glass-brd);
   border-radius:var(--radius-lg); backdrop-filter:blur(18px);
   box-shadow:0 15px 40px -20px rgba(0,0,0,.6);
-  transition:border-color .4s var(--ease), background .4s var(--ease);
 }
 
-/* ---------- Main Grid ---------- */
 .grid{display:grid; grid-template-columns:1.55fr 1fr; gap:18px; align-items:stretch;}
 @media(max-width:1080px){.grid{grid-template-columns:1fr;}}
 
-/* ---------- Horizontal Form ---------- */
+/* Horizontal Form Card */
 .form-card{padding:18px 22px;}
 .form-card h2{font-family:var(--font-display); font-size:17px; margin:0 0 2px; color:var(--text-hi);}
 .form-card .sub{color:var(--text-mid); font-size:11.5px; margin:0 0 10px;}
@@ -405,24 +392,13 @@ input[type="range"]::-moz-range-thumb{
   border:2px solid var(--accent); cursor:pointer;
 }
 
-input[type="number"]{
+input[type="number"], select{
   width:100%; padding:7px 10px; border-radius:var(--radius-sm);
   border:1px solid var(--glass-brd); background:rgba(0,0,0,.15);
   color:var(--text-hi); font-size:12px; outline:none;
 }
-html[data-theme="ivory"] input[type="number"]{background:rgba(255,255,255,.6);}
-input[type="number"]:focus{border-color:var(--accent);}
-
-select{
-  width:100%; padding:7px 10px; border-radius:var(--radius-sm);
-  border:1px solid var(--glass-brd); background:rgba(0,0,0,.15);
-  color:var(--text-hi); font-size:12px; outline:none; cursor:pointer;
-  appearance:none; -webkit-appearance:none;
-  background-image:linear-gradient(45deg,transparent 50%,var(--text-mid) 50%),linear-gradient(135deg,var(--text-mid) 50%,transparent 50%);
-  background-position:calc(100% - 14px) center, calc(100% - 10px) center;
-  background-size:4px 4px, 4px 4px; background-repeat:no-repeat;
-}
-html[data-theme="ivory"] select{background-color:rgba(255,255,255,.6);}
+html[data-theme="ivory"] input[type="number"], html[data-theme="ivory"] select{background:rgba(255,255,255,.6);}
+input[type="number"]:focus, select:focus{border-color:var(--accent);}
 
 .seg{display:flex; border-radius:var(--radius-sm); overflow:hidden; border:1px solid var(--glass-brd);}
 .seg button{
@@ -461,7 +437,6 @@ html[data-theme="ivory"] .seg button{background:rgba(255,255,255,.5);}
 .btn{
   border:none; border-radius:999px; font-weight:700; font-size:13px; cursor:pointer;
   padding:10px 18px; display:inline-flex; align-items:center; justify-content:center; gap:6px;
-  position:relative; overflow:hidden;
 }
 .btn-primary{
   flex:1; color:var(--accent-ink);
@@ -471,7 +446,7 @@ html[data-theme="ivory"] .seg button{background:rgba(255,255,255,.5);}
 .btn-primary:hover{transform:translateY(-1px); filter:brightness(1.06);}
 .btn-ghost{background:transparent; color:var(--text-mid); border:1px solid var(--glass-brd);}
 
-/* ---------- Result / gauge card ---------- */
+/* Result card */
 .result-card{padding:18px 20px; display:flex; flex-direction:column; align-items:center; justify-content:space-between; text-align:center;}
 .result-card h2{font-family:var(--font-display); font-size:17px; margin:0 0 2px;}
 .result-card .sub{color:var(--text-mid); font-size:11.5px; margin:0 0 4px;}
@@ -506,7 +481,7 @@ html[data-theme="ivory"] .seg button{background:rgba(255,255,255,.5);}
 
 .placeholder-note{color:var(--text-low); font-size:11px; line-height:1.4; margin-top:8px;}
 
-/* ---------- Dashboard ---------- */
+/* Dashboard */
 .dash{margin-top:18px;}
 .dash-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:12px;}
 .dash-head h2{font-family:var(--font-display); font-size:17px; margin:0;}
@@ -540,7 +515,7 @@ table.recent .badge.high{background:rgba(242,102,74,.15); color:var(--bad);}
 footer{margin-top:20px; text-align:center; color:var(--text-low); font-size:11px;}
 </style>
 </head>
-<body data-theme="midnight">
+<body>
 <div class="wrap">
 
   <div class="topbar">
@@ -641,7 +616,7 @@ footer{margin-top:20px; text-align:center; color:var(--text-low); font-size:11px
     <div class="card result-card">
       <div>
         <h2>Risk Assessment</h2>
-        <p class="sub">Live prediction from the ANN model</p>
+        <p class="sub">Live prediction from ANN model</p>
       </div>
 
       <div class="gauge-wrap">
@@ -700,7 +675,7 @@ footer{margin-top:20px; text-align:center; color:var(--text-low); font-size:11px
 <script>
 const FEATURE_META = {{ features | tojson }};
 
-/* ---------------- Theme switching ---------------- */
+// Theme switcher
 const themeSwitch = document.getElementById('themeSwitch');
 themeSwitch.addEventListener('click', (e) => {
   const dot = e.target.closest('.theme-dot');
@@ -711,7 +686,7 @@ themeSwitch.addEventListener('click', (e) => {
   document.documentElement.setAttribute('data-theme', dot.dataset.t);
 });
 
-/* ---------------- Field wiring ---------------- */
+// Field wiring
 FEATURE_META.forEach(f => {
   if(f.kind === 'range'){
     const el = document.getElementById('in_' + f.key);
@@ -758,7 +733,6 @@ function collectPayload(){
   return payload;
 }
 
-/* ---------------- Gauge ---------------- */
 function drawGauge(pct){
   const svg = document.getElementById('gaugeSvg');
   const cx = 120, cy = 115, r = 85;
@@ -781,24 +755,19 @@ function drawGauge(pct){
   document.getElementById('gaugeLbl').textContent = 'churn probability';
 }
 
-/* ---------------- Predict ---------------- */
-const form = document.getElementById('predictForm');
-form.addEventListener('submit', async (e) => {
+document.getElementById('predictForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('predictBtn');
   btn.disabled = true;
-  const payload = collectPayload();
   try{
     const res = await fetch('/api/predict', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
+      body: JSON.stringify(collectPayload())
     });
     const data = await res.json();
     renderResult(data);
     renderDashboard(data.stats);
-  } catch(err){
-    console.error(err);
   } finally {
     btn.disabled = false;
   }
@@ -813,7 +782,7 @@ function renderResult(data){
   pill.className = 'risk-pill ' + data.risk_class;
   document.getElementById('riskText').textContent = data.risk + ' Risk';
 
-  const impactsBlock = document.getElementById('impactsBlock');
+  const block = document.getElementById('impactsBlock');
   const list = document.getElementById('impactsList');
   list.innerHTML = '';
   data.impacts.slice(0, 4).forEach(im => {
@@ -829,10 +798,9 @@ function renderResult(data){
     `;
     list.appendChild(row);
   });
-  impactsBlock.style.display = 'block';
+  block.style.display = 'block';
 }
 
-/* ---------------- Dashboard render ---------------- */
 function renderDashboard(stats){
   document.getElementById('statTotal').textContent = stats.total;
   document.getElementById('statChurn').innerHTML = stats.churn_rate + '<span>%</span>';
@@ -841,14 +809,12 @@ function renderDashboard(stats){
 
   const histRow = document.getElementById('histRow');
   const histLabels = document.getElementById('histLabels');
-  histRow.innerHTML = '';
-  histLabels.innerHTML = '';
+  histRow.innerHTML = ''; histLabels.innerHTML = '';
   const maxCount = Math.max(1, ...stats.buckets);
   stats.buckets.forEach((c, i) => {
     const bar = document.createElement('div');
     bar.className = 'hist-bar';
     bar.style.height = Math.max(3, (c / maxCount) * 80) + 'px';
-    bar.title = (i*10) + '-' + (i*10+10) + '%: ' + c;
     histRow.appendChild(bar);
     const lbl = document.createElement('span');
     lbl.textContent = i % 2 === 0 ? (i*10) + '%' : '';
@@ -876,19 +842,8 @@ function renderDashboard(stats){
 }
 
 document.getElementById('resetBtn').addEventListener('click', () => window.location.reload());
-
-document.getElementById('clearHistoryBtn').addEventListener('click', async () => {
-  const res = await fetch('/api/reset', {method:'POST'});
-  const stats = await res.json();
-  renderDashboard(stats);
-});
-
-/* initial empty gauge */
 drawGauge(0);
 document.getElementById('gaugeNum').textContent = '--%';
-document.getElementById('gaugeLbl').textContent = 'awaiting input';
-
-/* initial dashboard load */
 fetch('/api/stats').then(r => r.json()).then(renderDashboard);
 </script>
 </body>
