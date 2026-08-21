@@ -1,9 +1,15 @@
 """
 ChurnGuard AI - Customer Churn Prediction (ANN)
 ================================================
-Single-file Flask application. Loads a pre-trained Keras ANN (ANN.pkl) and
-serves a premium, multi-theme analytics dashboard for predicting bank
+Single-file Flask application. Loads a pre-trained Keras ANN from ANN.pkl
+and serves a premium, multi-theme analytics dashboard for predicting bank
 customer churn risk.
+
+Files needed to run/deploy:
+    app.py            (this file)
+    requirements.txt  (dependencies)
+    ANN.pkl           (your trained Keras model - keep it in the same
+                       folder as app.py)
 
 Run:
     pip install -r requirements.txt
@@ -19,8 +25,8 @@ Model details (introspected from ANN.pkl):
              Dense(7, relu) -> Dense(1, sigmoid)
 
 IMPORTANT - about scaling:
-    The uploaded pickle contains ONLY the trained network, not the
-    StandardScaler/LabelEncoder objects used at training time. To make
+    ANN.pkl contains ONLY the trained network, not the
+    StandardScaler/LabelEncoder used at training time. To make
     predictions meaningful, this app standardizes inputs using the
     well-known population statistics of the classic "Churn_Modelling.csv"
     bank-churn dataset (the dataset this exact architecture is almost
@@ -28,6 +34,14 @@ IMPORTANT - about scaling:
     saved as scaler.pkl, a pickled sklearn StandardScaler), drop it next
     to this file - the app will detect and use it automatically for
     exact-match predictions instead of the approximate stats below.
+
+DEPLOYING ON RENDER (or any host):
+    This app depends on TensorFlow to unpickle/run ANN.pkl. TensorFlow
+    does not yet ship wheels for every Python version, so make sure your
+    host uses Python 3.11 or 3.12 - NOT a bleeding-edge version like 3.13+.
+    On Render: Dashboard -> your service -> Environment -> add
+    PYTHON_VERSION = 3.11.9   (no extra files required for this - it's
+    just an environment variable in the dashboard).
 """
 
 import os
