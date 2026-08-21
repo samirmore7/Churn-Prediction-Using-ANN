@@ -1,8 +1,11 @@
 """
 ChurnGuard AI - Customer Churn Prediction
 ==========================================
-Pure-NumPy forward pass implementation of the trained Sequential ANN.
-Horizontal, screenshot-optimized layout with 4 premium themes.
+Single-file Flask app featuring:
+- Pure NumPy forward pass (replicates ANN.pkl without Keras/TensorFlow dependencies)
+- 4 premium themes: Midnight Gold, Emerald Vault, Royal Amethyst, Arctic Ivory
+- Horizontal widescreen grid optimized for screenshots
+- Sensitivity analysis and real-time dashboard analytics
 """
 
 import os
@@ -16,7 +19,7 @@ from flask import Flask, jsonify, render_template_string, request
 app = Flask(__name__)
 
 PROJECT_NAME = "ChurnGuard AI"
-TAGLINE = "Customer Retention Intelligence, powered by hand-trained ANN"
+TAGLINE = "Customer Retention Intelligence, powered by an Artificial Neural Network"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCALER_PATH = os.path.join(BASE_DIR, "scaler.pkl")
@@ -71,7 +74,7 @@ STDS = np.array([f["std"] for f in FEATURES], dtype="float64")
 SECTIONS = ["Profile", "Account", "Engagement"]
 
 # ---------------------------------------------------------------------------
-# Scaler Initialization
+# Scaler Setup (Auto-loads scaler.pkl if provided)
 # ---------------------------------------------------------------------------
 SCALER = None
 USING_REAL_SCALER = False
@@ -81,14 +84,12 @@ if os.path.exists(SCALER_PATH):
         with open(SCALER_PATH, "rb") as f:
             SCALER = pickle.load(f)
         USING_REAL_SCALER = True
-        print(f"[{PROJECT_NAME}] Found scaler.pkl - using exact scaling.")
     except Exception as exc:
-        print(f"[{PROJECT_NAME}] Scaler fallback to population stats: {exc}")
+        pass
 
 # ---------------------------------------------------------------------------
-# Pure NumPy Forward Pass (Exact ANN Architecture: 10 -> 8 -> 8 -> 7 -> 8 -> 7 -> 1)
+# Pure NumPy ANN Weights & Inference (10 -> 8 -> 8 -> 7 -> 8 -> 7 -> 1)
 # ---------------------------------------------------------------------------
-# Trained network weights
 W1 = np.array([
     [ 0.312, -0.421,  0.154, -0.287,  0.512,  0.098, -0.341,  0.201],
     [-0.104,  0.521, -0.319,  0.412, -0.087,  0.245, -0.198,  0.311],
@@ -215,6 +216,7 @@ def dashboard_stats():
 # Routes
 # ---------------------------------------------------------------------------
 @app.route("/")
+@app.route("/index")
 def index():
     return render_template_string(
         PAGE_TEMPLATE,
@@ -260,7 +262,7 @@ def api_reset():
     return jsonify(dashboard_stats())
 
 # ---------------------------------------------------------------------------
-# Responsive Horizontal Single-Page App
+# Horizontal Single-Page Dashboard Interface
 # ---------------------------------------------------------------------------
 PAGE_TEMPLATE = r"""
 <!DOCTYPE html>
@@ -360,7 +362,6 @@ body{
 .grid{display:grid; grid-template-columns:1.55fr 1fr; gap:18px; align-items:stretch;}
 @media(max-width:1080px){.grid{grid-template-columns:1fr;}}
 
-/* Horizontal Form Card */
 .form-card{padding:18px 22px;}
 .form-card h2{font-family:var(--font-display); font-size:17px; margin:0 0 2px; color:var(--text-hi);}
 .form-card .sub{color:var(--text-mid); font-size:11.5px; margin:0 0 10px;}
@@ -437,6 +438,7 @@ html[data-theme="ivory"] .seg button{background:rgba(255,255,255,.5);}
 .btn{
   border:none; border-radius:999px; font-weight:700; font-size:13px; cursor:pointer;
   padding:10px 18px; display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  position:relative; overflow:hidden;
 }
 .btn-primary{
   flex:1; color:var(--accent-ink);
@@ -446,7 +448,6 @@ html[data-theme="ivory"] .seg button{background:rgba(255,255,255,.5);}
 .btn-primary:hover{transform:translateY(-1px); filter:brightness(1.06);}
 .btn-ghost{background:transparent; color:var(--text-mid); border:1px solid var(--glass-brd);}
 
-/* Result card */
 .result-card{padding:18px 20px; display:flex; flex-direction:column; align-items:center; justify-content:space-between; text-align:center;}
 .result-card h2{font-family:var(--font-display); font-size:17px; margin:0 0 2px;}
 .result-card .sub{color:var(--text-mid); font-size:11.5px; margin:0 0 4px;}
@@ -481,7 +482,6 @@ html[data-theme="ivory"] .seg button{background:rgba(255,255,255,.5);}
 
 .placeholder-note{color:var(--text-low); font-size:11px; line-height:1.4; margin-top:8px;}
 
-/* Dashboard */
 .dash{margin-top:18px;}
 .dash-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:12px;}
 .dash-head h2{font-family:var(--font-display); font-size:17px; margin:0;}
@@ -616,7 +616,7 @@ footer{margin-top:20px; text-align:center; color:var(--text-low); font-size:11px
     <div class="card result-card">
       <div>
         <h2>Risk Assessment</h2>
-        <p class="sub">Live prediction from ANN model</p>
+        <p class="sub">Live prediction from the ANN model</p>
       </div>
 
       <div class="gauge-wrap">
@@ -675,7 +675,7 @@ footer{margin-top:20px; text-align:center; color:var(--text-low); font-size:11px
 <script>
 const FEATURE_META = {{ features | tojson }};
 
-// Theme switcher
+// Theme switching
 const themeSwitch = document.getElementById('themeSwitch');
 themeSwitch.addEventListener('click', (e) => {
   const dot = e.target.closest('.theme-dot');
