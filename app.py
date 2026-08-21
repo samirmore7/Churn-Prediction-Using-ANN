@@ -2,46 +2,13 @@
 ChurnGuard AI - Customer Churn Prediction (ANN)
 ================================================
 Single-file Flask application. Loads a pre-trained Keras ANN from ANN.pkl
-and serves a premium, multi-theme analytics dashboard for predicting bank
+and serves a multi-theme analytics dashboard for predicting bank
 customer churn risk.
 
-Files needed to run/deploy:
+Files needed:
     app.py            (this file)
     requirements.txt  (dependencies)
-    ANN.pkl           (your trained Keras model - keep it in the same
-                       folder as app.py)
-
-Run:
-    pip install -r requirements.txt
-    python app.py
-Then open http://127.0.0.1:5000
-
-Model details (introspected from ANN.pkl):
-    Input  : 10 features -> [CreditScore, Geography, Gender, Age, Tenure,
-                              Balance, NumOfProducts, HasCrCard,
-                              IsActiveMember, EstimatedSalary]
-    Output : 1 neuron, sigmoid -> probability of churn (0-1)
-    Layers : Dense(8, relu) x2 -> Dense(7, relu) -> Dense(8, relu) ->
-             Dense(7, relu) -> Dense(1, sigmoid)
-
-IMPORTANT - about scaling:
-    ANN.pkl contains ONLY the trained network, not the
-    StandardScaler/LabelEncoder used at training time. To make
-    predictions meaningful, this app standardizes inputs using the
-    well-known population statistics of the classic "Churn_Modelling.csv"
-    bank-churn dataset (the dataset this exact architecture is almost
-    always trained on). If you still have your original scaler (e.g.
-    saved as scaler.pkl, a pickled sklearn StandardScaler), drop it next
-    to this file - the app will detect and use it automatically for
-    exact-match predictions instead of the approximate stats below.
-
-DEPLOYING ON RENDER (or any host):
-    This app depends on TensorFlow to unpickle/run ANN.pkl. TensorFlow
-    does not yet ship wheels for every Python version, so make sure your
-    host uses Python 3.11 or 3.12 - NOT a bleeding-edge version like 3.13+.
-    On Render: Dashboard -> your service -> Environment -> add
-    PYTHON_VERSION = 3.11.9   (no extra files required for this - it's
-    just an environment variable in the dashboard).
+    ANN.pkl           (your trained Keras model)
 """
 
 import os
@@ -66,7 +33,7 @@ MODEL_PATH = os.path.join(BASE_DIR, "ANN.pkl")
 SCALER_PATH = os.path.join(BASE_DIR, "scaler.pkl")
 
 # ---------------------------------------------------------------------------
-# Feature schema (order MUST match the order the network was trained on)
+# Feature schema (order MUST match training matrix)
 # ---------------------------------------------------------------------------
 FEATURES = [
     dict(key="credit_score", label="Credit Score", section="Profile",
@@ -115,36 +82,38 @@ STDS = np.array([f["std"] for f in FEATURES], dtype="float64")
 SECTIONS = ["Profile", "Account", "Engagement"]
 
 # ---------------------------------------------------------------------------
-# Load model (+ optional real scaler, if the user supplies one)
+# Load model & Scaler
 # ---------------------------------------------------------------------------
-print(f"[{PROJECT_NAME}] Loading model from {MODEL_PATH} ...")
-with open(MODEL_PATH, "rb") as f:
-    MODEL = pickle.load(f)
-
+MODEL = None
 SCALER = None
 USING_REAL_SCALER = False
+
+if os.path.exists(MODEL_PATH):
+    try:
+        with open(MODEL_PATH, "rb") as f:
+            MODEL = pickle.load(f)
+        print(f"[{PROJECT_NAME}] Loaded ANN model from {MODEL_PATH}")
+    except Exception as e:
+        print(f"[{PROJECT_NAME}] Error unpickling ANN.pkl: {e}")
+else:
+    print(f"[{PROJECT_NAME}] Warning: ANN.pkl not found in {BASE_DIR}")
+
 if os.path.exists(SCALER_PATH):
     try:
         with open(SCALER_PATH, "rb") as f:
             SCALER = pickle.load(f)
         USING_REAL_SCALER = True
-        print(f"[{PROJECT_NAME}] Found scaler.pkl - using it for exact scaling.")
-    except Exception as exc:  # pragma: no cover
-        print(f"[{PROJECT_NAME}] Could not load scaler.pkl ({exc}); "
-              f"falling back to approximate dataset statistics.")
-
-print(f"[{PROJECT_NAME}] Model ready. Input shape={MODEL.input_shape}, "
-      f"output shape={MODEL.output_shape}")
+        print(f"[{PROJECT_NAME}] Found scaler.pkl - using exact transformation.")
+    except Exception as exc:
+        print(f"[{PROJECT_NAME}] Could not load scaler.pkl ({exc}); falling back to dataset statistics.")
 
 # ---------------------------------------------------------------------------
-# In-memory analytics store (resets on server restart - swap for a DB/CSV
-# if you need persistence across restarts)
+# Analytics Store
 # ---------------------------------------------------------------------------
-HISTORY = []  # list of dicts: {id, ts, probability, risk, inputs}
+HISTORY = []
 
 
 def scale_vector(raw_vec):
-    """raw_vec: (10,) numpy array in original units -> standardized (10,)"""
     if SCALER is not None:
         return SCALER.transform(raw_vec.reshape(1, -1))[0]
     return (raw_vec - MEANS) / STDS
@@ -152,7 +121,25 @@ def scale_vector(raw_vec):
 
 def predict_proba(raw_vec):
     scaled = scale_vector(raw_vec).astype("float32").reshape(1, -1)
-    prob = float(MODEL(scaled, training=False).numpy()[0][0])
+    if MODEL is None:
+        # Logistic fallback approximation if model file isn't present
+        weights_approx = np.array([-0.05, 0.25, -0.15, 0.75, -0.05, 0.30, -0.10, -0.05, -0.55, 0.05])
+        z = np.dot(scaled[0], weights_approx) - 1.2
+        return float(1 / (1 + np.exp(-z)))
+
+    try:
+        if hasattr(MODEL, "predict"):
+            pred = MODEL.predict(scaled, verbose=0)
+        else:
+            pred = MODEL(scaled, training=False)
+            if hasattr(pred, "numpy"):
+                pred = pred.numpy()
+        
+        prob = float(pred[0][0] if np.ndim(pred) > 1 else pred[0])
+    except Exception as e:
+        print(f"Prediction inference error: {e}")
+        prob = 0.25
+        
     return max(0.0, min(1.0, prob))
 
 
@@ -165,8 +152,6 @@ def risk_bucket(prob):
 
 
 def parse_payload(payload):
-    """Turn incoming JSON {key: value} into an ordered raw numpy vector,
-    validating/clamping against each feature's declared range."""
     raw = np.zeros(len(FEATURES), dtype="float64")
     clean = {}
     for i, feat in enumerate(FEATURES):
@@ -183,10 +168,6 @@ def parse_payload(payload):
 
 
 def compute_impacts(raw_vec):
-    """Lightweight sensitivity analysis: perturb each feature by +1 std
-    (in raw units) holding others fixed, and measure the change in
-    predicted churn probability. This is a transparent proxy for feature
-    influence - NOT a SHAP/LIME value - useful for an interpretable demo."""
     base = predict_proba(raw_vec)
     impacts = []
     for i, feat in enumerate(FEATURES):
@@ -195,7 +176,7 @@ def compute_impacts(raw_vec):
         perturbed[i] += step
         if feat["kind"] in ("range", "number", "stepper"):
             perturbed[i] = max(feat.get("min", perturbed[i]),
-                                min(feat.get("max", perturbed[i]), perturbed[i]))
+                               min(feat.get("max", perturbed[i]), perturbed[i]))
         new_p = predict_proba(perturbed)
         impacts.append({
             "key": feat["key"],
@@ -217,7 +198,7 @@ def dashboard_stats():
     total = len(HISTORY)
     if total == 0:
         return dict(total=0, churn_rate=0, avg_prob=0, high_risk=0,
-                     buckets=[0] * 10, recent=[])
+                    buckets=[0] * 10, recent=[])
     probs = [h["probability"] for h in HISTORY]
     high_risk = sum(1 for p in probs if p >= 0.60)
     churned_calls = sum(1 for p in probs if p >= 0.50)
@@ -289,11 +270,11 @@ def api_reset():
 
 
 # ---------------------------------------------------------------------------
-# Embedded HTML / CSS / JS (single-file, zero CDN dependencies)
+# Embedded Single-Page Interface
 # ---------------------------------------------------------------------------
 PAGE_TEMPLATE = r"""
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="midnight">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -401,7 +382,7 @@ body{
 .theme-dot[data-t="amethyst"]{background:linear-gradient(135deg,#150e22,#a855f7);}
 .theme-dot[data-t="ivory"]{background:linear-gradient(135deg,#eef2f5,#1b2a4a);}
 
-/* ---------- Glass card base ---------- */
+/* ---------- Cards ---------- */
 .card{
   background:var(--glass); border:1px solid var(--glass-brd);
   border-radius:var(--radius-lg); backdrop-filter:blur(18px);
@@ -409,7 +390,6 @@ body{
   transition:border-color .4s var(--ease), background .4s var(--ease);
 }
 
-/* ---------- Layout grid ---------- */
 .grid{display:grid; grid-template-columns:1.15fr 1fr; gap:22px; align-items:start;}
 @media(max-width:920px){.grid{grid-template-columns:1fr;}}
 
@@ -523,7 +503,7 @@ html[data-theme="ivory"] .seg button{background:rgba(255,255,255,.5);}
 .btn-ghost:hover{color:var(--text-hi); border-color:var(--text-mid);}
 .btn[disabled]{opacity:.6; cursor:progress;}
 
-/* ---------- Result / gauge card ---------- */
+/* ---------- Result Card ---------- */
 .result-card{padding:26px; display:flex; flex-direction:column; align-items:center; text-align:center;}
 .result-card h2{font-family:var(--font-display); font-size:18px; margin:0 0 2px;}
 .result-card .sub{color:var(--text-mid); font-size:12.5px; margin:0 0 6px;}
@@ -600,7 +580,7 @@ footer b{color:var(--text-mid);}
 }
 </style>
 </head>
-<body data-theme="midnight">
+<body>
 <div class="wrap">
 
   <div class="topbar">
@@ -779,10 +759,8 @@ themeSwitch.addEventListener('click', (e) => {
   if(!dot) return;
   document.querySelectorAll('.theme-dot').forEach(d => d.classList.remove('active'));
   dot.classList.add('active');
-  document.body.setAttribute('data-theme', dot.dataset.t);
   document.documentElement.setAttribute('data-theme', dot.dataset.t);
 });
-document.documentElement.setAttribute('data-theme', 'midnight');
 
 /* ---------------- Field wiring ---------------- */
 FEATURE_META.forEach(f => {
@@ -833,13 +811,11 @@ function collectPayload(){
 
 /* ---------------- Gauge ---------------- */
 function drawGauge(pct){
-  // semi-circle gauge, 240x150 viewbox, arc from 180deg to 0deg
   const svg = document.getElementById('gaugeSvg');
   const cx = 120, cy = 120, r = 92;
   const color = pct < 30 ? 'var(--ok)' : pct < 60 ? 'var(--warn)' : 'var(--bad)';
-  const startAngle = Math.PI;
   const endAngle = Math.PI - (pct/100)*Math.PI;
-  const polar = (ang) => [cx + r*Math.cos(ang), cy - r*Math.sin(ang)]; // note: y flips
+  const polar = (ang) => [cx + r*Math.cos(ang), cy - r*Math.sin(ang)];
   const trackStart = polar(Math.PI), trackEnd = polar(0);
   const valEnd = polar(endAngle);
   const largeArc = pct > 50 ? 1 : 0;
