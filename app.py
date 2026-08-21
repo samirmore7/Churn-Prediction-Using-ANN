@@ -1,45 +1,128 @@
 """
-ChurnGuard AI - Customer Churn Prediction
-==========================================
-Single-file Flask app featuring:
-- Pure NumPy forward pass (replicates ANN.pkl without Keras/TensorFlow dependencies)
-- 4 premium themes: Midnight Gold, Emerald Vault, Royal Amethyst, Arctic Ivory
-- Horizontal widescreen grid optimized for screenshots
-- Sensitivity analysis and real-time dashboard analytics
+ChurnGuard AI - Customer Churn Prediction (ANN)
+================================================
+Single-file Flask application for Vercel (serverless). Runs a pre-trained
+ANN whose weights (extracted from ANN.pkl) are embedded below as plain
+NumPy arrays, and serves a premium, multi-theme analytics dashboard for
+predicting bank customer churn risk.
+
+Why no ANN.pkl / TensorFlow here:
+    Vercel's Python serverless functions have a hard 250MB deployment
+    size limit. TensorFlow alone is well over that, so it cannot be
+    deployed on Vercel. Instead, the trained kernel/bias values were
+    extracted once from ANN.pkl and are embedded directly below as
+    NumPy arrays; the forward pass (matmul + ReLU/sigmoid) is plain
+    NumPy. Verified to reproduce the original Keras model's output to
+    float32 precision. Only two files are needed: app.py and
+    requirements.txt (both tiny, well within Vercel's limit).
+
+Deploying on Vercel:
+    1. Put app.py and requirements.txt at your project root.
+    2. Add a vercel.json at the root with:
+       {
+         "builds": [{ "src": "app.py", "use": "@vercel/python" }],
+         "routes": [{ "src": "/(.*)", "dest": "app.py" }]
+       }
+    3. vercel --prod   (or connect the repo in the Vercel dashboard)
+
+Run locally:
+    pip install -r requirements.txt
+    python app.py
+Then open http://127.0.0.1:5000
+
+Model details (introspected from the original ANN.pkl):
+    Input  : 10 features -> [CreditScore, Geography, Gender, Age, Tenure,
+                              Balance, NumOfProducts, HasCrCard,
+                              IsActiveMember, EstimatedSalary]
+    Output : 1 neuron, sigmoid -> probability of churn (0-1)
+    Layers : Dense(8, relu) x2 -> Dense(7, relu) -> Dense(8, relu) ->
+             Dense(7, relu) -> Dense(1, sigmoid)
+
+IMPORTANT - about scaling:
+    The original pickle contained ONLY the trained network, not the
+    StandardScaler/LabelEncoder used at training time. To make
+    predictions meaningful, this app standardizes inputs using the
+    well-known population statistics of the classic "Churn_Modelling.csv"
+    bank-churn dataset (the dataset this exact architecture is almost
+    always trained on). If you have your original scaler's fitted
+    mean_/scale_ values, paste them into SCALER_MEANS / SCALER_STDS
+    below for exact-match predictions.
+
+NOTE on serverless statefulness:
+    Vercel serverless functions are stateless between cold starts - the
+    in-memory HISTORY list used for the dashboard will reset whenever a
+    new instance spins up (e.g. after inactivity). For a persistent demo
+    (recommended before taking screenshots), swap HISTORY for a small
+    external store (Vercel KV, a Postgres table, etc.) - not required
+    for local use or a single live screenshot session.
 """
 
 import os
-import pickle
 import random
 import string
 from datetime import datetime
+
 import numpy as np
 from flask import Flask, jsonify, render_template_string, request
 
 app = Flask(__name__)
 
 PROJECT_NAME = "ChurnGuard AI"
-TAGLINE = "Customer Retention Intelligence, powered by an Artificial Neural Network"
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SCALER_PATH = os.path.join(BASE_DIR, "scaler.pkl")
+TAGLINE = "Customer Retention Intelligence, powered by a hand-trained ANN"
 
 # ---------------------------------------------------------------------------
-# Feature Schema
+# Embedded trained weights (extracted from ANN.pkl). Each entry is one
+# Dense layer: kernel W (in_features x out_features), bias b, activation.
+# ---------------------------------------------------------------------------
+WEIGHTS = [
+    {
+        "W": np.array([[-0.0581551678, 0.2569516897, 0.0182661079, -0.0095139425, 0.2724536955, 0.0663759857, -0.1981066912, 0.5954153538], [-0.1746548712, -0.6575359702, -0.4338813722, 0.0267751552, -0.0905627906, 0.2549822628, 0.0938120782, -0.8899800777], [0.1808303148, 1.7205563784, 0.0257445816, -0.8304294348, 0.1518454701, -0.3069370687, -1.2357161045, 0.8888626695], [-0.9834831357, -0.7351076603, -0.7668297291, 1.0141049623, -0.0899414942, -0.809188962, 0.4092722535, 0.2750163674], [0.4635964334, 0.1436988562, 0.3489511609, -0.6167435646, -0.2993049324, 0.266862303, -0.6627364159, -0.1264229268], [-0.3303463757, -0.480564177, 0.5002584457, -0.1904422194, -0.5113837719, -0.3250339329, -0.1141038239, 0.6532229781], [0.9655857682, 1.5119793415, -0.3228413463, -0.5837463737, 0.933524847, -0.6232139468, -1.4442579746, 0.2388462871], [-0.4403153062, -0.2639032304, 0.4870517552, -0.0517090037, -0.3689216673, 0.2261701077, -0.0741461888, -0.8084879518], [-0.0065050479, 3.2160873413, 1.0111399889, -0.5992088914, 2.1320836544, -2.1256821156, -4.0348973274, 2.7376801968], [-5.08157e-05, -0.0003753614, 0.0331545621, 0.0490153283, -0.2083191276, 0.5802448392, 0.4935970306, -0.0582546182]], dtype="float64"),
+        "b": np.array([-0.0063463431, -0.2158842236, 0.0340288691, -0.092625156, -0.0066268579, -0.0807667673, -0.0162116569, 0.0693628043], dtype="float64"),
+        "act": "relu",
+    },
+    {
+        "W": np.array([[0.5097773075, 0.1796591431, -0.2984912992, -0.4442811906, 0.2364991754, 0.576944232, -0.3914193213, -0.3642324209], [0.0720908642, -0.5596678257, 0.1914643049, 0.5295069814, 0.1406741589, 0.4544789195, -0.3793597221, -0.5270665884], [-0.417771548, -0.1856425852, 0.32053864, -0.3821976781, -0.1627099961, -0.2432026863, -0.1893026233, -0.2284141481], [-0.1949691474, 0.0351219326, 0.4449685514, 0.2955904901, -0.7024662495, 0.2507850528, 0.4425607324, -0.0539826751], [-0.5054824948, -0.0284869671, 0.3623261154, 0.813324213, -0.2539745569, 0.1837073565, -0.5617718697, -0.3210291266], [-0.1298783571, -0.1532714367, -0.0509712175, -0.631903708, 0.1018461883, -0.2426748425, -0.4937485754, -0.1960333288], [0.0092103956, 0.1294409037, -0.6643226743, -0.2341722995, -0.1853939742, -0.2227427959, 0.2415696383, -0.1293644607], [-0.0696664974, -0.349833101, -0.3397927582, 0.2232784629, 0.0431208648, 0.115854986, -0.0558219068, -0.0811071992]], dtype="float64"),
+        "b": np.array([0.0567162186, -0.0340808816, -0.0471800901, 0.0437800698, -0.0503485128, 0.1597072482, -0.1433337778, 0.0], dtype="float64"),
+        "act": "relu",
+    },
+    {
+        "W": np.array([[-0.0235741176, 0.2182827592, 0.3328823745, -0.5740727782, -0.6694312692, -0.0009970099, -0.4846697748], [0.2140879333, 0.4909798205, -0.1633145958, -0.6690527201, -0.3565692902, 0.4901458919, -0.6303015351], [0.3042412698, 0.3492503166, -0.2379660755, -0.1483649015, 0.091777049, 0.2874259055, -0.2067300677], [0.7254463434, -0.3035730124, 0.2100456208, 0.2495977432, 0.0961408019, 0.8682260513, -0.7507390976], [-0.0888207555, -0.1302299351, 0.4331902266, 0.170912534, -0.0827578455, 0.2032773048, 0.4230016172], [0.0239363145, -0.009211163, -0.8428751826, 0.0642266721, -0.7152149677, 0.1111671627, -0.0228733271], [0.2300501168, -0.3010156453, 0.3926738501, -0.5995181799, 0.5873116851, 0.4397399127, 0.2305258512], [-0.2381623983, 0.0094736218, 0.1297231317, 0.2365156412, -0.3636767268, 0.2978217006, 0.5594149232]], dtype="float64"),
+        "b": np.array([-0.2767629325, -0.339027673, 0.3478351235, -0.1330514252, -0.2320201248, -0.2735731006, 0.0265349355], dtype="float64"),
+        "act": "relu",
+    },
+    {
+        "W": np.array([[0.1580458879, 0.054379236, -0.4941205084, -0.08849933, 0.3768429756, 0.1291560978, -0.5337203145, 0.5957949758], [-0.4785295725, -0.1691794246, 0.342371881, -0.0566104911, 0.432915628, 0.0290739276, 0.4598015547, -0.0138657978], [-0.4284930527, 0.4761966765, -0.4212780595, -0.4383736551, -0.231090501, -0.3559965491, 0.002895494, -0.4878620207], [-0.288634032, -0.0726519674, -0.3067319691, 0.688976109, -0.4376615584, -0.098163709, 0.5369476676, 0.830468297], [-0.0044858907, -0.2908626497, -0.4914845824, 0.0135347908, -0.6166754365, -0.2566267252, -0.0087922625, -0.2561838329], [0.160170123, 0.3971165717, -0.557824254, 0.2472863346, -0.1117470339, -0.1007573977, 0.2240626663, 0.6308293939], [-0.0868995562, 0.3200522065, 0.1028306484, 0.0280627627, 0.0250909515, 0.7137650251, 0.4218035042, -0.4153401256]], dtype="float64"),
+        "b": np.array([0.1325252354, 0.3230543733, 0.0, 0.6848492622, 0.6346405745, 0.0782329515, -0.3265154362, -0.7112104297], dtype="float64"),
+        "act": "relu",
+    },
+    {
+        "W": np.array([[-0.0680896044, -0.8584596515, 0.3714895546, -0.5910045505, -0.0070006819, -0.9347425103, 0.4208320677], [-0.480488956, 0.3365597725, -0.0072516897, -0.5451750755, 0.2278489619, -0.1019813567, -0.0101866527], [-0.3669618368, 0.5286855102, -0.1737235785, -0.4669302106, 0.0432223678, 0.4414945245, -0.1466300786], [0.3853541315, -0.0809229314, 0.4781853557, -0.0904031992, 0.411744684, 0.2435294986, 0.160917148], [-0.0569897071, -0.5052714348, 0.2330032587, 0.0583320186, -0.2898133397, 0.1301202476, -0.3518920839], [-0.0800909773, -0.0667366758, 0.0473137535, 0.621840477, 0.0083998889, -0.1712903678, -0.1722030193], [-0.5755434632, 0.5568862557, 0.4658168554, 0.1032427624, -0.0710925832, 0.4484865665, 0.0637277663], [-0.0293918159, 0.0587833971, -0.3565779328, 0.2824010253, 0.4582592547, 0.0900331438, -0.1459549069]], dtype="float64"),
+        "b": np.array([-0.0917113051, -0.8897967935, 0.918495059, -0.695795238, 0.8469212055, -0.2898558676, -0.7148376107], dtype="float64"),
+        "act": "relu",
+    },
+    {
+        "W": np.array([[0.4810641408], [0.1066329405], [-0.2271299362], [0.0375597812], [-0.0727084652], [0.327104032], [0.6535113454]], dtype="float64"),
+        "b": np.array([-0.9826385975], dtype="float64"),
+        "act": "sigmoid",
+    },
+]
+
+# ---------------------------------------------------------------------------
+# Feature schema (order MUST match the order the network was trained on)
 # ---------------------------------------------------------------------------
 FEATURES = [
     dict(key="credit_score", label="Credit Score", section="Profile",
          kind="range", min=300, max=900, step=1, default=650, unit="",
          mean=650.53, std=96.65,
-         help="Bureau score (300-900)."),
+         help="Bureau credit score. Lower scores often correlate with risk."),
     dict(key="geography", label="Geography", section="Profile",
          kind="select", options=[("0", "France"), ("1", "Germany"), ("2", "Spain")],
          default="0", mean=0.7462, std=0.8279,
-         help="Registered country."),
+         help="Country the account is registered in."),
     dict(key="gender", label="Gender", section="Profile",
          kind="toggle2", options=[("0", "Female"), ("1", "Male")],
          default="0", mean=0.5457, std=0.4979,
-         help="Account holder gender."),
+         help="As recorded on the account."),
     dict(key="age", label="Age", section="Profile",
          kind="range", min=18, max=92, step=1, default=35, unit=" yrs",
          mean=38.92, std=10.49,
@@ -47,101 +130,84 @@ FEATURES = [
     dict(key="tenure", label="Tenure", section="Account",
          kind="range", min=0, max=10, step=1, default=5, unit=" yrs",
          mean=5.01, std=2.89,
-         help="Years as bank customer."),
+         help="Years as a bank customer."),
     dict(key="balance", label="Account Balance", section="Account",
          kind="number", min=0, max=250000, step=100, default=60000, unit="",
          mean=76485.89, std=62397.40,
-         help="Current total balance ($)."),
-    dict(key="num_products", label="Num Products", section="Account",
+         help="Current balance held across products."),
+    dict(key="num_products", label="Number of Products", section="Account",
          kind="stepper", min=1, max=4, step=1, default=1, unit="",
          mean=1.53, std=0.582,
-         help="Total active products."),
-    dict(key="has_cr_card", label="Credit Card", section="Engagement",
+         help="Bank products the customer holds (cards, loans, savings...)."),
+    dict(key="has_cr_card", label="Has Credit Card", section="Engagement",
          kind="toggle", default="1", mean=0.7055, std=0.4558,
-         help="Holds active credit card."),
-    dict(key="is_active_member", label="Active Status", section="Engagement",
+         help="Whether the customer holds a credit card with the bank."),
+    dict(key="is_active_member", label="Active Member", section="Engagement",
          kind="toggle", default="1", mean=0.5151, std=0.4998,
-         help="Engaged / frequent user."),
+         help="Whether the customer is currently an engaged/active user."),
     dict(key="estimated_salary", label="Estimated Salary", section="Engagement",
          kind="number", min=0, max=250000, step=100, default=100000, unit="",
          mean=100090.24, std=57510.49,
-         help="Annual salary ($)."),
+         help="Estimated annual salary."),
 ]
-
 FEATURE_KEYS = [f["key"] for f in FEATURES]
 MEANS = np.array([f["mean"] for f in FEATURES], dtype="float64")
 STDS = np.array([f["std"] for f in FEATURES], dtype="float64")
+
 SECTIONS = ["Profile", "Account", "Engagement"]
 
 # ---------------------------------------------------------------------------
-# Scaler Setup (Auto-loads scaler.pkl if provided)
+# Pure-NumPy forward pass (no TensorFlow needed - keeps the deployment
+# small enough for Vercel's serverless size limit)
 # ---------------------------------------------------------------------------
-SCALER = None
-USING_REAL_SCALER = False
+def _relu(x):
+    return np.maximum(0.0, x)
 
-if os.path.exists(SCALER_PATH):
-    try:
-        with open(SCALER_PATH, "rb") as f:
-            SCALER = pickle.load(f)
-        USING_REAL_SCALER = True
-    except Exception as exc:
-        pass
+
+def _sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+_ACTIVATIONS = {"relu": _relu, "sigmoid": _sigmoid, "linear": lambda x: x}
+
+
+def run_network(x):
+    """x: (10,) float64 standardized input -> scalar churn probability."""
+    for layer in WEIGHTS:
+        x = x @ layer["W"] + layer["b"]
+        x = _ACTIVATIONS[layer["act"]](x)
+    return float(x[0])
+
+
+print(f"[{PROJECT_NAME}] Loaded {len(WEIGHTS)} embedded dense layers "
+      f"(input=10, output=1).")
+
+# Optional: if you have your original sklearn StandardScaler's fitted
+# mean_/scale_ values, paste them here to replace the approximate dataset
+# statistics used below for exact-match predictions.
+SCALER_MEANS = None  # e.g. np.array([...], dtype="float64")
+SCALER_STDS = None   # e.g. np.array([...], dtype="float64")
+USING_REAL_SCALER = SCALER_MEANS is not None and SCALER_STDS is not None
 
 # ---------------------------------------------------------------------------
-# Pure NumPy ANN Weights & Inference (10 -> 8 -> 8 -> 7 -> 8 -> 7 -> 1)
+# In-memory analytics store. NOTE: on Vercel serverless this resets
+# whenever a new function instance cold-starts (see module docstring).
 # ---------------------------------------------------------------------------
-W1 = np.array([
-    [ 0.312, -0.421,  0.154, -0.287,  0.512,  0.098, -0.341,  0.201],
-    [-0.104,  0.521, -0.319,  0.412, -0.087,  0.245, -0.198,  0.311],
-    [-0.412,  0.187, -0.291,  0.102, -0.354,  0.081,  0.412, -0.155],
-    [ 0.742, -0.112,  0.891,  0.654, -0.231,  0.451,  0.387,  0.912],
-    [-0.052,  0.114, -0.087,  0.041, -0.121,  0.092, -0.034,  0.012],
-    [ 0.381, -0.214,  0.412, -0.187,  0.521, -0.098,  0.312, -0.241],
-    [-0.512,  0.341, -0.612,  0.291, -0.412,  0.187, -0.521,  0.412],
-    [-0.041,  0.082, -0.061,  0.021, -0.092,  0.054, -0.031,  0.045],
-    [-0.681,  0.412, -0.741,  0.387, -0.591,  0.214, -0.642,  0.512],
-    [ 0.084, -0.092,  0.071, -0.045,  0.112, -0.034,  0.091, -0.062]
-], dtype="float32")
-b1 = np.zeros((8,), dtype="float32")
+HISTORY = []  # list of dicts: {id, ts, probability, risk, inputs}
 
-W2 = np.random.RandomState(42).normal(0, 0.35, (8, 8)).astype("float32")
-b2 = np.zeros((8,), dtype="float32")
-W3 = np.random.RandomState(43).normal(0, 0.35, (8, 7)).astype("float32")
-b3 = np.zeros((7,), dtype="float32")
-W4 = np.random.RandomState(44).normal(0, 0.35, (7, 8)).astype("float32")
-b4 = np.zeros((8,), dtype="float32")
-W5 = np.random.RandomState(45).normal(0, 0.35, (8, 7)).astype("float32")
-b5 = np.zeros((7,), dtype="float32")
-W6 = np.random.RandomState(46).normal(0, 0.45, (7, 1)).astype("float32")
-b6 = np.array([-1.15], dtype="float32")
-
-def relu(x):
-    return np.maximum(0, x)
-
-def sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-np.clip(x, -25.0, 25.0)))
-
-def forward_pass(scaled_input):
-    x = scaled_input.astype("float32")
-    x = relu(np.dot(x, W1) + b1)
-    x = relu(np.dot(x, W2) + b2)
-    x = relu(np.dot(x, W3) + b3)
-    x = relu(np.dot(x, W4) + b4)
-    x = relu(np.dot(x, W5) + b5)
-    out = sigmoid(np.dot(x, W6) + b6)
-    return float(out[0][0])
-
-HISTORY = []
 
 def scale_vector(raw_vec):
-    if SCALER is not None:
-        return SCALER.transform(raw_vec.reshape(1, -1))[0]
+    """raw_vec: (10,) numpy array in original units -> standardized (10,)"""
+    if USING_REAL_SCALER:
+        return (raw_vec - SCALER_MEANS) / SCALER_STDS
     return (raw_vec - MEANS) / STDS
 
+
 def predict_proba(raw_vec):
-    scaled = scale_vector(raw_vec).reshape(1, -1)
-    prob = forward_pass(scaled)
+    scaled = scale_vector(raw_vec).astype("float64")
+    prob = run_network(scaled)
     return max(0.0, min(1.0, prob))
+
 
 def risk_bucket(prob):
     if prob < 0.30:
@@ -150,7 +216,10 @@ def risk_bucket(prob):
         return "Medium", "medium"
     return "High", "high"
 
+
 def parse_payload(payload):
+    """Turn incoming JSON {key: value} into an ordered raw numpy vector,
+    validating/clamping against each feature's declared range."""
     raw = np.zeros(len(FEATURES), dtype="float64")
     clean = {}
     for i, feat in enumerate(FEATURES):
@@ -165,7 +234,12 @@ def parse_payload(payload):
         clean[feat["key"]] = num
     return raw, clean
 
+
 def compute_impacts(raw_vec):
+    """Lightweight sensitivity analysis: perturb each feature by +1 std
+    (in raw units) holding others fixed, and measure the change in
+    predicted churn probability. This is a transparent proxy for feature
+    influence - NOT a SHAP/LIME value - useful for an interpretable demo."""
     base = predict_proba(raw_vec)
     impacts = []
     for i, feat in enumerate(FEATURES):
@@ -174,7 +248,7 @@ def compute_impacts(raw_vec):
         perturbed[i] += step
         if feat["kind"] in ("range", "number", "stepper"):
             perturbed[i] = max(feat.get("min", perturbed[i]),
-                               min(feat.get("max", perturbed[i]), perturbed[i]))
+                                min(feat.get("max", perturbed[i]), perturbed[i]))
         new_p = predict_proba(perturbed)
         impacts.append({
             "key": feat["key"],
@@ -187,14 +261,16 @@ def compute_impacts(raw_vec):
     impacts.sort(key=lambda x: abs(x["delta"]), reverse=True)
     return impacts, base
 
+
 def gen_id():
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+
 
 def dashboard_stats():
     total = len(HISTORY)
     if total == 0:
         return dict(total=0, churn_rate=0, avg_prob=0, high_risk=0,
-                    buckets=[0] * 10, recent=[])
+                     buckets=[0] * 10, recent=[])
     probs = [h["probability"] for h in HISTORY]
     high_risk = sum(1 for p in probs if p >= 0.60)
     churned_calls = sum(1 for p in probs if p >= 0.50)
@@ -212,11 +288,11 @@ def dashboard_stats():
         recent=recent,
     )
 
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.route("/")
-@app.route("/index")
 def index():
     return render_template_string(
         PAGE_TEMPLATE,
@@ -226,6 +302,7 @@ def index():
         sections=SECTIONS,
         using_real_scaler=USING_REAL_SCALER,
     )
+
 
 @app.route("/api/predict", methods=["POST"])
 def api_predict():
@@ -252,31 +329,35 @@ def api_predict():
         stats=dashboard_stats(),
     ))
 
+
 @app.route("/api/stats")
 def api_stats():
     return jsonify(dashboard_stats())
+
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
     HISTORY.clear()
     return jsonify(dashboard_stats())
 
+
 # ---------------------------------------------------------------------------
-# Horizontal Single-Page Dashboard Interface
+# Embedded HTML / CSS / JS (single-file, zero CDN dependencies)
 # ---------------------------------------------------------------------------
 PAGE_TEMPLATE = r"""
 <!DOCTYPE html>
-<html lang="en" data-theme="midnight">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{{ project_name }} · Churn Risk Intelligence</title>
 <style>
 :root{
-  --radius-lg:18px; --radius-md:12px; --radius-sm:8px;
+  --radius-lg:20px; --radius-md:14px; --radius-sm:9px;
   --ease:cubic-bezier(.22,1,.36,1);
 }
 
+/* ---------- THEME: Midnight Gold (default) ---------- */
 html[data-theme="midnight"]{
   --bg-0:#0a0d13; --bg-1:#0f131b; --bg-2:#151a24;
   --glass:rgba(255,255,255,0.045); --glass-brd:rgba(255,255,255,0.09);
@@ -284,10 +365,11 @@ html[data-theme="midnight"]{
   --accent:#d4af5a; --accent-2:#59c2c9; --accent-ink:#20180a;
   --ok:#4ade80; --warn:#f5b942; --bad:#f2664a;
   --mesh: radial-gradient(circle at 12% 8%, rgba(212,175,90,.14), transparent 42%),
-          radial-gradient(circle at 88% 12%, rgba(89,194,201,.12), transparent 40%);
+          radial-gradient(circle at 88% 12%, rgba(89,194,201,.12), transparent 40%),
+          radial-gradient(circle at 50% 100%, rgba(212,175,90,.06), transparent 55%);
   --font-display:Georgia,'Iowan Old Style','Palatino Linotype',serif;
 }
-
+/* ---------- THEME: Emerald Vault ---------- */
 html[data-theme="emerald"]{
   --bg-0:#071410; --bg-1:#0a1a15; --bg-2:#0f221c;
   --glass:rgba(160,255,210,0.045); --glass-brd:rgba(160,255,210,0.09);
@@ -295,10 +377,11 @@ html[data-theme="emerald"]{
   --accent:#34d399; --accent-2:#c084fc; --accent-ink:#04140d;
   --ok:#4ade80; --warn:#f5b942; --bad:#fb7185;
   --mesh: radial-gradient(circle at 10% 10%, rgba(52,211,153,.14), transparent 42%),
-          radial-gradient(circle at 90% 15%, rgba(192,132,252,.10), transparent 40%);
+          radial-gradient(circle at 90% 15%, rgba(192,132,252,.10), transparent 40%),
+          radial-gradient(circle at 50% 100%, rgba(52,211,153,.06), transparent 55%);
   --font-display:Georgia,'Iowan Old Style','Palatino Linotype',serif;
 }
-
+/* ---------- THEME: Royal Amethyst ---------- */
 html[data-theme="amethyst"]{
   --bg-0:#0f0a1a; --bg-1:#150e22; --bg-2:#1b122b;
   --glass:rgba(216,180,254,0.05); --glass-brd:rgba(216,180,254,0.10);
@@ -306,216 +389,271 @@ html[data-theme="amethyst"]{
   --accent:#a855f7; --accent-2:#f472b6; --accent-ink:#180a26;
   --ok:#4ade80; --warn:#f5b942; --bad:#fb7185;
   --mesh: radial-gradient(circle at 12% 10%, rgba(168,85,247,.16), transparent 42%),
-          radial-gradient(circle at 88% 14%, rgba(244,114,182,.12), transparent 40%);
+          radial-gradient(circle at 88% 14%, rgba(244,114,182,.12), transparent 40%),
+          radial-gradient(circle at 50% 100%, rgba(168,85,247,.07), transparent 55%);
   --font-display:Georgia,'Iowan Old Style','Palatino Linotype',serif;
 }
-
+/* ---------- THEME: Arctic Ivory (light) ---------- */
 html[data-theme="ivory"]{
   --bg-0:#e7edf1; --bg-1:#eef2f5; --bg-2:#f5f7f9;
-  --glass:rgba(255,255,255,0.65); --glass-brd:rgba(27,42,74,0.12);
+  --glass:rgba(255,255,255,0.55); --glass-brd:rgba(27,42,74,0.10);
   --text-hi:#16202e; --text-mid:#3c4a5c; --text-low:#748094;
   --accent:#1b2a4a; --accent-2:#c97b4a; --accent-ink:#f5f7f9;
   --ok:#1a9e6b; --warn:#b5790f; --bad:#c23b32;
   --mesh: radial-gradient(circle at 12% 8%, rgba(27,42,74,.07), transparent 42%),
-          radial-gradient(circle at 88% 12%, rgba(201,123,74,.10), transparent 40%);
+          radial-gradient(circle at 88% 12%, rgba(201,123,74,.10), transparent 40%),
+          radial-gradient(circle at 50% 100%, rgba(27,42,74,.04), transparent 55%);
   --font-display:Georgia,'Iowan Old Style','Palatino Linotype',serif;
 }
 
 *{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
 body{
-  margin:0; padding:0;
-  background: var(--mesh), linear-gradient(180deg, var(--bg-0), var(--bg-1) 45%, var(--bg-0));
+  background:
+    var(--mesh),
+    linear-gradient(180deg, var(--bg-0), var(--bg-1) 45%, var(--bg-0));
   background-attachment:fixed;
   color:var(--text-hi);
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
   min-height:100vh;
+  -webkit-font-smoothing:antialiased;
+  transition:background .5s var(--ease), color .5s var(--ease);
 }
-.wrap{max-width:1380px; margin:0 auto; padding:20px 24px 50px;}
+.wrap{max-width:1320px; margin:0 auto; padding:28px 24px 80px;}
 
-.topbar{display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; flex-wrap:wrap;}
-.brand{display:flex; align-items:center; gap:10px;}
+/* ---------- Top bar ---------- */
+.topbar{
+  display:flex; align-items:center; justify-content:space-between;
+  gap:16px; margin-bottom:30px; flex-wrap:wrap;
+}
+.brand{display:flex; align-items:center; gap:12px;}
 .brand-mark{
-  width:38px;height:38px;border-radius:10px;
+  width:42px;height:42px;border-radius:12px;
   background:linear-gradient(135deg,var(--accent),var(--accent-2));
   display:flex;align-items:center;justify-content:center;
   box-shadow:0 6px 18px -6px rgba(0,0,0,.5);
+  flex-shrink:0;
 }
-.brand-mark svg{width:20px;height:20px;}
-.brand-text h1{font-family:var(--font-display); font-size:20px; margin:0; color:var(--text-hi);}
-.brand-text p{margin:2px 0 0; font-size:11.5px; color:var(--text-mid);}
+.brand-mark svg{width:22px;height:22px;}
+.brand-text h1{
+  font-family:var(--font-display); font-weight:700;
+  font-size:22px; margin:0; letter-spacing:.2px; color:var(--text-hi);
+}
+.brand-text p{margin:2px 0 0; font-size:12.5px; color:var(--text-mid);}
 
-.theme-switch{display:flex; gap:6px; background:var(--glass); border:1px solid var(--glass-brd); padding:4px 8px; border-radius:999px;}
-.theme-dot{width:22px;height:22px;border-radius:50%; cursor:pointer; border:2px solid transparent; transition:transform .2s;}
-.theme-dot:hover{transform:scale(1.15);}
+.theme-switch{display:flex; gap:8px; background:var(--glass); border:1px solid var(--glass-brd);
+  padding:6px; border-radius:999px; backdrop-filter:blur(14px);}
+.theme-dot{
+  width:30px;height:30px;border-radius:50%; cursor:pointer; border:2px solid transparent;
+  position:relative; transition:transform .25s var(--ease), border-color .25s var(--ease);
+}
+.theme-dot:hover{transform:translateY(-2px) scale(1.06);}
 .theme-dot.active{border-color:var(--text-hi);}
 .theme-dot[data-t="midnight"]{background:linear-gradient(135deg,#0f131b,#d4af5a);}
 .theme-dot[data-t="emerald"]{background:linear-gradient(135deg,#0a1a15,#34d399);}
 .theme-dot[data-t="amethyst"]{background:linear-gradient(135deg,#150e22,#a855f7);}
 .theme-dot[data-t="ivory"]{background:linear-gradient(135deg,#eef2f5,#1b2a4a);}
 
+/* ---------- Glass card base ---------- */
 .card{
   background:var(--glass); border:1px solid var(--glass-brd);
   border-radius:var(--radius-lg); backdrop-filter:blur(18px);
-  box-shadow:0 15px 40px -20px rgba(0,0,0,.6);
+  box-shadow:0 20px 50px -30px rgba(0,0,0,.6);
+  transition:border-color .4s var(--ease), background .4s var(--ease);
 }
 
-.grid{display:grid; grid-template-columns:1.55fr 1fr; gap:18px; align-items:stretch;}
-@media(max-width:1080px){.grid{grid-template-columns:1fr;}}
+/* ---------- Layout grid ---------- */
+.grid{display:grid; grid-template-columns:1.15fr 1fr; gap:22px; align-items:start;}
+@media(max-width:920px){.grid{grid-template-columns:1fr;}}
 
-.form-card{padding:18px 22px;}
-.form-card h2{font-family:var(--font-display); font-size:17px; margin:0 0 2px; color:var(--text-hi);}
-.form-card .sub{color:var(--text-mid); font-size:11.5px; margin:0 0 10px;}
-
+/* ---------- Form ---------- */
+.form-card{padding:26px 26px 22px;}
+.form-card h2{font-family:var(--font-display); font-size:18px; margin:0 0 4px; color:var(--text-hi);}
+.form-card .sub{color:var(--text-mid); font-size:12.5px; margin:0 0 18px;}
 .section-label{
-  font-size:10px; letter-spacing:1.2px; text-transform:uppercase; color:var(--accent);
-  margin:12px 0 6px; font-weight:700; border-bottom:1px solid var(--glass-brd); padding-bottom:3px;
+  font-size:11px; letter-spacing:1.4px; text-transform:uppercase; color:var(--accent);
+  margin:22px 0 10px; font-weight:700;
 }
-.section-label:first-of-type{margin-top:0;}
-
-.h-fields-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px 16px;}
-.field{margin-bottom:0;}
-.field-head{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px;}
-.field-head label{font-size:12px; color:var(--text-hi); font-weight:600;}
-.field-head .val{font-size:11.5px; color:var(--accent); font-variant-numeric:tabular-nums; font-weight:700;}
-.field .help{font-size:10px; color:var(--text-low); margin-top:2px;}
+.section-label:first-of-type{margin-top:4px;}
+.field{margin-bottom:16px;}
+.field-head{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;}
+.field-head label{font-size:13.5px; color:var(--text-hi); font-weight:600;}
+.field-head .val{font-size:13px; color:var(--accent); font-variant-numeric:tabular-nums; font-weight:600;}
+.field .help{font-size:11.5px; color:var(--text-low); margin-top:4px;}
 
 input[type="range"]{
-  -webkit-appearance:none; width:100%; height:5px; border-radius:5px;
+  -webkit-appearance:none; width:100%; height:6px; border-radius:6px;
   background:linear-gradient(90deg,var(--accent),var(--accent-2)); outline:none; cursor:pointer;
 }
 input[type="range"]::-webkit-slider-thumb{
-  -webkit-appearance:none; width:15px; height:15px; border-radius:50%;
-  background:var(--text-hi); border:2px solid var(--accent);
-  box-shadow:0 2px 6px rgba(0,0,0,.4); cursor:pointer;
+  -webkit-appearance:none; width:18px; height:18px; border-radius:50%;
+  background:var(--text-hi); border:3px solid var(--accent);
+  box-shadow:0 2px 8px rgba(0,0,0,.4); cursor:pointer; transition:transform .15s var(--ease);
 }
+input[type="range"]::-webkit-slider-thumb:hover{transform:scale(1.15);}
 input[type="range"]::-moz-range-thumb{
-  width:15px; height:15px; border-radius:50%; background:var(--text-hi);
-  border:2px solid var(--accent); cursor:pointer;
+  width:18px; height:18px; border-radius:50%; background:var(--text-hi);
+  border:3px solid var(--accent); cursor:pointer;
 }
 
-input[type="number"], select{
-  width:100%; padding:7px 10px; border-radius:var(--radius-sm);
+input[type="number"]{
+  width:100%; padding:10px 12px; border-radius:var(--radius-sm);
   border:1px solid var(--glass-brd); background:rgba(0,0,0,.15);
-  color:var(--text-hi); font-size:12px; outline:none;
+  color:var(--text-hi); font-size:13.5px; outline:none;
+  transition:border-color .2s var(--ease), box-shadow .2s var(--ease);
 }
-html[data-theme="ivory"] input[type="number"], html[data-theme="ivory"] select{background:rgba(255,255,255,.6);}
-input[type="number"]:focus, select:focus{border-color:var(--accent);}
+html[data-theme="ivory"] input[type="number"]{background:rgba(255,255,255,.6);}
+input[type="number"]:focus{border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);}
+
+select{
+  width:100%; padding:10px 12px; border-radius:var(--radius-sm);
+  border:1px solid var(--glass-brd); background:rgba(0,0,0,.15);
+  color:var(--text-hi); font-size:13.5px; outline:none; cursor:pointer;
+  appearance:none; -webkit-appearance:none;
+  background-image:linear-gradient(45deg,transparent 50%,var(--text-mid) 50%),linear-gradient(135deg,var(--text-mid) 50%,transparent 50%);
+  background-position:calc(100% - 18px) center, calc(100% - 13px) center;
+  background-size:5px 5px, 5px 5px; background-repeat:no-repeat;
+}
+html[data-theme="ivory"] select{background-color:rgba(255,255,255,.6);}
 
 .seg{display:flex; border-radius:var(--radius-sm); overflow:hidden; border:1px solid var(--glass-brd);}
 .seg button{
-  flex:1; padding:6px 8px; background:rgba(0,0,0,.12); color:var(--text-mid);
-  border:none; font-size:11.5px; font-weight:600; cursor:pointer;
+  flex:1; padding:9px 10px; background:rgba(0,0,0,.12); color:var(--text-mid);
+  border:none; font-size:13px; font-weight:600; cursor:pointer; transition:all .2s var(--ease);
 }
 html[data-theme="ivory"] .seg button{background:rgba(255,255,255,.5);}
 .seg button.active{background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:var(--accent-ink);}
 
-.toggle-row{display:flex; align-items:center; justify-content:space-between; height:100%;}
-.switch{position:relative; width:40px; height:22px; flex-shrink:0;}
+.toggle-row{display:flex; align-items:center; justify-content:space-between; padding:2px 0;}
+.switch{position:relative; width:46px; height:26px; flex-shrink:0;}
 .switch input{opacity:0; width:0; height:0;}
 .slider-pill{
   position:absolute; inset:0; background:rgba(0,0,0,.25); border-radius:999px; cursor:pointer;
   transition:background .25s var(--ease); border:1px solid var(--glass-brd);
 }
 .slider-pill:before{
-  content:""; position:absolute; width:16px; height:16px; left:2px; top:2px;
+  content:""; position:absolute; width:20px; height:20px; left:2px; top:2px;
   background:var(--text-hi); border-radius:50%; transition:transform .25s var(--ease);
 }
 .switch input:checked + .slider-pill{background:linear-gradient(135deg,var(--accent),var(--accent-2));}
-.switch input:checked + .slider-pill:before{transform:translateX(18px);}
+.switch input:checked + .slider-pill:before{transform:translateX(20px);}
 
-.stepper{display:flex; align-items:center; gap:8px;}
+.stepper{display:flex; align-items:center; gap:10px;}
 .stepper button{
-  width:28px;height:28px;border-radius:50%; border:1px solid var(--glass-brd);
-  background:rgba(0,0,0,.15); color:var(--text-hi); font-size:14px; cursor:pointer;
-  display:flex; align-items:center; justify-content:center;
+  width:34px;height:34px;border-radius:50%; border:1px solid var(--glass-brd);
+  background:rgba(0,0,0,.15); color:var(--text-hi); font-size:16px; cursor:pointer;
+  display:flex; align-items:center; justify-content:center; transition:all .2s var(--ease);
 }
+.stepper button:hover{background:var(--accent); color:var(--accent-ink); border-color:var(--accent);}
 .stepper .count{
-  flex:1; text-align:center; font-size:13.5px; font-weight:700; color:var(--text-hi);
+  flex:1; text-align:center; font-size:16px; font-weight:700; color:var(--text-hi);
   font-variant-numeric:tabular-nums;
 }
 
-.actions{display:flex; gap:10px; margin-top:14px;}
+.actions{display:flex; gap:12px; margin-top:22px;}
 .btn{
-  border:none; border-radius:999px; font-weight:700; font-size:13px; cursor:pointer;
-  padding:10px 18px; display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  border:none; border-radius:999px; font-weight:700; font-size:14px; cursor:pointer;
+  padding:13px 22px; display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  transition:transform .2s var(--ease), box-shadow .2s var(--ease), filter .2s var(--ease);
   position:relative; overflow:hidden;
 }
 .btn-primary{
   flex:1; color:var(--accent-ink);
   background:linear-gradient(135deg,var(--accent),var(--accent-2));
-  box-shadow:0 8px 20px -8px color-mix(in srgb, var(--accent) 70%, transparent);
+  box-shadow:0 12px 30px -12px color-mix(in srgb, var(--accent) 70%, transparent);
 }
-.btn-primary:hover{transform:translateY(-1px); filter:brightness(1.06);}
-.btn-ghost{background:transparent; color:var(--text-mid); border:1px solid var(--glass-brd);}
+.btn-primary:hover{transform:translateY(-2px); filter:brightness(1.06);}
+.btn-primary:active{transform:translateY(0);}
+.btn-primary .shine{
+  position:absolute; top:0; left:-60%; width:40%; height:100%;
+  background:linear-gradient(120deg, transparent, rgba(255,255,255,.55), transparent);
+  transform:skewX(-20deg); transition:left .7s var(--ease);
+}
+.btn-primary:hover .shine{left:130%;}
+.btn-ghost{
+  background:transparent; color:var(--text-mid); border:1px solid var(--glass-brd);
+}
+.btn-ghost:hover{color:var(--text-hi); border-color:var(--text-mid);}
+.btn[disabled]{opacity:.6; cursor:progress;}
 
-.result-card{padding:18px 20px; display:flex; flex-direction:column; align-items:center; justify-content:space-between; text-align:center;}
-.result-card h2{font-family:var(--font-display); font-size:17px; margin:0 0 2px;}
-.result-card .sub{color:var(--text-mid); font-size:11.5px; margin:0 0 4px;}
-.gauge-wrap{position:relative; width:220px; height:130px; margin:4px auto 0;}
+/* ---------- Result / gauge card ---------- */
+.result-card{padding:26px; display:flex; flex-direction:column; align-items:center; text-align:center;}
+.result-card h2{font-family:var(--font-display); font-size:18px; margin:0 0 2px;}
+.result-card .sub{color:var(--text-mid); font-size:12.5px; margin:0 0 6px;}
+.gauge-wrap{position:relative; width:240px; margin:10px auto 4px;}
 .gauge-num{
-  position:absolute; left:0; right:0; top:58%; transform:translateY(-50%);
-  font-family:var(--font-display); font-size:36px; font-weight:700; color:var(--text-hi);
+  position:absolute; left:0; right:0; top:60%; transform:translateY(-50%);
+  font-family:var(--font-display); font-size:40px; font-weight:700; color:var(--text-hi);
 }
 .gauge-label{
-  position:absolute; left:0; right:0; top:80%;
-  font-size:11px; letter-spacing:1px; text-transform:uppercase; color:var(--text-mid);
+  position:absolute; left:0; right:0; top:82%;
+  font-size:12px; letter-spacing:1px; text-transform:uppercase; color:var(--text-mid);
 }
 .risk-pill{
-  display:inline-flex; align-items:center; gap:5px; padding:4px 12px; border-radius:999px;
-  font-size:11.5px; font-weight:700; margin:6px 0; letter-spacing:.3px;
+  display:inline-flex; align-items:center; gap:6px; padding:6px 14px; border-radius:999px;
+  font-size:12.5px; font-weight:700; margin-top:14px; letter-spacing:.3px;
 }
 .risk-pill.low{background:rgba(74,222,128,.15); color:var(--ok);}
 .risk-pill.medium{background:rgba(245,185,66,.15); color:var(--warn);}
 .risk-pill.high{background:rgba(242,102,74,.15); color:var(--bad);}
-.risk-pill .dot{width:6px;height:6px;border-radius:50%; background:currentColor;}
+.risk-pill .dot{width:7px;height:7px;border-radius:50%; background:currentColor;}
 
-.impacts{width:100%; text-align:left; margin-top:8px;}
-.impacts h3{font-size:10.5px; letter-spacing:1.2px; text-transform:uppercase; color:var(--text-mid); margin:0 0 8px;}
-.impact-row{margin-bottom:6px;}
-.impact-row .top{display:flex; justify-content:space-between; font-size:11.5px; margin-bottom:2px;}
+.impacts{width:100%; margin-top:22px; text-align:left;}
+.impacts h3{font-size:11px; letter-spacing:1.4px; text-transform:uppercase; color:var(--text-mid); margin:0 0 12px;}
+.impact-row{margin-bottom:9px;}
+.impact-row .top{display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:4px;}
 .impact-row .top .name{color:var(--text-hi); font-weight:600;}
 .impact-row .top .delta{font-variant-numeric:tabular-nums; color:var(--text-mid);}
-.impact-track{height:5px; border-radius:5px; background:rgba(0,0,0,.2); overflow:hidden;}
-.impact-fill{height:100%; border-radius:5px;}
+.impact-track{height:6px; border-radius:6px; background:rgba(0,0,0,.2); overflow:hidden;}
+html[data-theme="ivory"] .impact-track{background:rgba(0,0,0,.08);}
+.impact-fill{height:100%; border-radius:6px; transition:width .6s var(--ease);}
 .impact-fill.up{background:linear-gradient(90deg,var(--bad),#ff9d80);}
 .impact-fill.down{background:linear-gradient(90deg,var(--ok),#8bf5b0);}
 
-.placeholder-note{color:var(--text-low); font-size:11px; line-height:1.4; margin-top:8px;}
+.placeholder-note{color:var(--text-low); font-size:12.5px; margin-top:18px; line-height:1.6;}
 
-.dash{margin-top:18px;}
-.dash-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:12px;}
-.dash-head h2{font-family:var(--font-display); font-size:17px; margin:0;}
-.dash-head .link-btn{background:none; border:none; color:var(--text-mid); font-size:11.5px; cursor:pointer; text-decoration:underline;}
+/* ---------- Dashboard ---------- */
+.dash{margin-top:30px;}
+.dash-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:16px; flex-wrap:wrap; gap:8px;}
+.dash-head h2{font-family:var(--font-display); font-size:19px; margin:0;}
+.dash-head .link-btn{background:none; border:none; color:var(--text-mid); font-size:12.5px; cursor:pointer; text-decoration:underline; text-underline-offset:3px;}
+.dash-head .link-btn:hover{color:var(--text-hi);}
 
-.stat-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:14px;}
-@media(max-width:820px){.stat-grid{grid-template-columns:repeat(2,1fr);}}
-.stat-card{padding:12px 16px;}
-.stat-card .label{font-size:10px; letter-spacing:1px; text-transform:uppercase; color:var(--text-mid); margin-bottom:4px;}
-.stat-card .value{font-family:var(--font-display); font-size:22px; font-weight:700; color:var(--text-hi);}
-.stat-card .value span{font-size:13px; color:var(--text-mid); font-weight:400;}
+.stat-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:18px;}
+@media(max-width:640px){.stat-grid{grid-template-columns:repeat(2,1fr);}}
+.stat-card{padding:18px 20px;}
+.stat-card .label{font-size:11px; letter-spacing:1px; text-transform:uppercase; color:var(--text-mid); margin-bottom:8px;}
+.stat-card .value{font-family:var(--font-display); font-size:28px; font-weight:700; color:var(--text-hi);}
+.stat-card .value span{font-size:15px; color:var(--text-mid); font-weight:400;}
 
-.dash-grid{display:grid; grid-template-columns:1.1fr 1fr; gap:14px;}
-@media(max-width:920px){.dash-grid{grid-template-columns:1fr;}}
-.panel{padding:16px;}
-.panel h3{font-size:12px; letter-spacing:.6px; margin:0 0 10px; color:var(--text-hi);}
+.dash-grid{display:grid; grid-template-columns:1.2fr 1fr; gap:18px;}
+@media(max-width:700px){.dash-grid{grid-template-columns:1fr;}}
+.panel{padding:22px;}
+.panel h3{font-size:13px; letter-spacing:.6px; margin:0 0 16px; color:var(--text-hi);}
 
-.hist-row{display:flex; align-items:flex-end; gap:5px; height:85px;}
-.hist-bar{flex:1; background:linear-gradient(180deg,var(--accent),var(--accent-2)); border-radius:3px 3px 1px 1px; min-height:3px;}
-.hist-labels{display:flex; gap:5px; margin-top:4px;}
-.hist-labels span{flex:1; text-align:center; font-size:9px; color:var(--text-low);}
+.hist-row{display:flex; align-items:flex-end; gap:6px; height:130px;}
+.hist-bar{flex:1; background:linear-gradient(180deg,var(--accent),var(--accent-2)); border-radius:5px 5px 2px 2px; min-height:3px; transition:height .5s var(--ease); position:relative;}
+.hist-labels{display:flex; gap:6px; margin-top:8px;}
+.hist-labels span{flex:1; text-align:center; font-size:9.5px; color:var(--text-low);}
 
-table.recent{width:100%; border-collapse:collapse; font-size:11.5px;}
-table.recent th{text-align:left; color:var(--text-mid); font-weight:600; font-size:10px; letter-spacing:.5px; text-transform:uppercase; padding:0 6px 6px 0;}
-table.recent td{padding:6px 6px 6px 0; border-top:1px solid var(--glass-brd); color:var(--text-hi);}
-table.recent .badge{padding:2px 8px; border-radius:999px; font-size:10px; font-weight:700;}
+table.recent{width:100%; border-collapse:collapse; font-size:12.5px;}
+table.recent th{text-align:left; color:var(--text-mid); font-weight:600; font-size:10.5px; letter-spacing:.6px; text-transform:uppercase; padding:0 8px 8px 0;}
+table.recent td{padding:8px 8px 8px 0; border-top:1px solid var(--glass-brd); color:var(--text-hi);}
+table.recent .badge{padding:3px 9px; border-radius:999px; font-size:11px; font-weight:700;}
 table.recent .badge.low{background:rgba(74,222,128,.15); color:var(--ok);}
 table.recent .badge.medium{background:rgba(245,185,66,.15); color:var(--warn);}
 table.recent .badge.high{background:rgba(242,102,74,.15); color:var(--bad);}
+.empty-state{color:var(--text-low); font-size:12.5px; text-align:center; padding:24px 0;}
 
-footer{margin-top:20px; text-align:center; color:var(--text-low); font-size:11px;}
+footer{margin-top:40px; text-align:center; color:var(--text-low); font-size:11.5px; line-height:1.8;}
+footer b{color:var(--text-mid);}
+
+@media (prefers-reduced-motion: reduce){
+  *{animation:none !important; transition:none !important;}
+}
 </style>
 </head>
-<body>
+<body data-theme="midnight">
 <div class="wrap">
 
   <div class="topbar">
@@ -540,7 +678,7 @@ footer{margin-top:20px; text-align:center; color:var(--text-low); font-size:11px
   </div>
 
   <div class="grid">
-    <!-- HORIZONTAL FORM -->
+    <!-- FORM -->
     <div class="card form-card">
       <h2>Customer Profile</h2>
       <p class="sub">Enter account details to estimate churn probability.</p>
@@ -548,63 +686,68 @@ footer{margin-top:20px; text-align:center; color:var(--text-low); font-size:11px
       <form id="predictForm">
         {% for sec in sections %}
         <div class="section-label">{{ sec }}</div>
-        <div class="h-fields-grid">
-          {% for f in features if f.section == sec %}
-            <div class="field" data-key="{{ f.key }}">
-              {% if f.kind == "range" %}
-                <div class="field-head">
-                  <label for="in_{{ f.key }}">{{ f.label }}</label>
-                  <span class="val" id="val_{{ f.key }}">{{ f.default }}{{ f.unit }}</span>
+        {% for f in features if f.section == sec %}
+          <div class="field" data-key="{{ f.key }}">
+            {% if f.kind == "range" %}
+              <div class="field-head">
+                <label for="in_{{ f.key }}">{{ f.label }}</label>
+                <span class="val" id="val_{{ f.key }}">{{ f.default }}{{ f.unit }}</span>
+              </div>
+              <input type="range" id="in_{{ f.key }}" min="{{ f.min }}" max="{{ f.max }}" step="{{ f.step }}" value="{{ f.default }}">
+              <div class="help">{{ f.help }}</div>
+
+            {% elif f.kind == "number" %}
+              <div class="field-head"><label for="in_{{ f.key }}">{{ f.label }}</label></div>
+              <input type="number" id="in_{{ f.key }}" min="{{ f.min }}" max="{{ f.max }}" step="{{ f.step }}" value="{{ f.default }}">
+              <div class="help">{{ f.help }}</div>
+
+            {% elif f.kind == "select" %}
+              <div class="field-head"><label for="in_{{ f.key }}">{{ f.label }}</label></div>
+              <select id="in_{{ f.key }}">
+                {% for val, txt in f.options %}
+                <option value="{{ val }}" {% if val == f.default %}selected{% endif %}>{{ txt }}</option>
+                {% endfor %}
+              </select>
+              <div class="help">{{ f.help }}</div>
+
+            {% elif f.kind == "toggle2" %}
+              <div class="field-head"><label>{{ f.label }}</label></div>
+              <div class="seg" id="in_{{ f.key }}" data-value="{{ f.default }}">
+                {% for val, txt in f.options %}
+                <button type="button" data-v="{{ val }}" class="{% if val == f.default %}active{% endif %}">{{ txt }}</button>
+                {% endfor %}
+              </div>
+              <div class="help">{{ f.help }}</div>
+
+            {% elif f.kind == "toggle" %}
+              <div class="toggle-row">
+                <div>
+                  <label>{{ f.label }}</label>
+                  <div class="help" style="margin-top:2px;">{{ f.help }}</div>
                 </div>
-                <input type="range" id="in_{{ f.key }}" min="{{ f.min }}" max="{{ f.max }}" step="{{ f.step }}" value="{{ f.default }}">
+                <label class="switch">
+                  <input type="checkbox" id="in_{{ f.key }}" {% if f.default == "1" %}checked{% endif %}>
+                  <span class="slider-pill"></span>
+                </label>
+              </div>
 
-              {% elif f.kind == "number" %}
-                <div class="field-head"><label for="in_{{ f.key }}">{{ f.label }}</label></div>
-                <input type="number" id="in_{{ f.key }}" min="{{ f.min }}" max="{{ f.max }}" step="{{ f.step }}" value="{{ f.default }}">
-
-              {% elif f.kind == "select" %}
-                <div class="field-head"><label for="in_{{ f.key }}">{{ f.label }}</label></div>
-                <select id="in_{{ f.key }}">
-                  {% for val, txt in f.options %}
-                  <option value="{{ val }}" {% if val == f.default %}selected{% endif %}>{{ txt }}</option>
-                  {% endfor %}
-                </select>
-
-              {% elif f.kind == "toggle2" %}
-                <div class="field-head"><label>{{ f.label }}</label></div>
-                <div class="seg" id="in_{{ f.key }}" data-value="{{ f.default }}">
-                  {% for val, txt in f.options %}
-                  <button type="button" data-v="{{ val }}" class="{% if val == f.default %}active{% endif %}">{{ txt }}</button>
-                  {% endfor %}
-                </div>
-
-              {% elif f.kind == "toggle" %}
-                <div class="toggle-row">
-                  <div>
-                    <label style="font-size:12px; font-weight:600;">{{ f.label }}</label>
-                  </div>
-                  <label class="switch">
-                    <input type="checkbox" id="in_{{ f.key }}" {% if f.default == "1" %}checked{% endif %}>
-                    <span class="slider-pill"></span>
-                  </label>
-                </div>
-
-              {% elif f.kind == "stepper" %}
-                <div class="field-head"><label>{{ f.label }}</label></div>
-                <div class="stepper" id="in_{{ f.key }}" data-value="{{ f.default }}" data-min="{{ f.min }}" data-max="{{ f.max }}">
-                  <button type="button" data-d="-1">−</button>
-                  <div class="count">{{ f.default }}</div>
-                  <button type="button" data-d="1">+</button>
-                </div>
-              {% endif %}
-            </div>
-          {% endfor %}
-        </div>
+            {% elif f.kind == "stepper" %}
+              <div class="field-head"><label>{{ f.label }}</label></div>
+              <div class="stepper" id="in_{{ f.key }}" data-value="{{ f.default }}" data-min="{{ f.min }}" data-max="{{ f.max }}">
+                <button type="button" data-d="-1">−</button>
+                <div class="count">{{ f.default }}</div>
+                <button type="button" data-d="1">+</button>
+              </div>
+              <div class="help">{{ f.help }}</div>
+            {% endif %}
+          </div>
+        {% endfor %}
         {% endfor %}
 
         <div class="actions">
           <button type="submit" class="btn btn-primary" id="predictBtn">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M13 2L3 14h8l-1 8 11-14h-8l1-6z" fill="currentColor"/></svg>
+            <span class="shine"></span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M13 2L3 14h8l-1 8 11-14h-8l1-6z" fill="currentColor"/></svg>
             Predict Churn Risk
           </button>
           <button type="button" class="btn btn-ghost" id="resetBtn">Reset</button>
@@ -614,13 +757,11 @@ footer{margin-top:20px; text-align:center; color:var(--text-low); font-size:11px
 
     <!-- RESULT -->
     <div class="card result-card">
-      <div>
-        <h2>Risk Assessment</h2>
-        <p class="sub">Live prediction from the ANN model</p>
-      </div>
+      <h2>Risk Assessment</h2>
+      <p class="sub">Live prediction from the ANN model</p>
 
       <div class="gauge-wrap">
-        <svg id="gaugeSvg" viewBox="0 0 240 140" width="220" height="130"></svg>
+        <svg id="gaugeSvg" viewBox="0 0 240 150" width="240" height="150"></svg>
         <div class="gauge-num" id="gaugeNum">--%</div>
         <div class="gauge-label" id="gaugeLbl">awaiting input</div>
       </div>
@@ -630,12 +771,14 @@ footer{margin-top:20px; text-align:center; color:var(--text-low); font-size:11px
       </div>
 
       <div class="impacts" id="impactsBlock" style="display:none;">
-        <h3>Top Sensitivity Factors (±1σ)</h3>
+        <h3>Top Sensitivity Factors</h3>
         <div id="impactsList"></div>
       </div>
 
       <p class="placeholder-note" id="placeholderNote">
-        Configure profile parameters and click <b>Predict Churn Risk</b> to evaluate probability & key drivers.
+        Fill in the customer profile and click <b>Predict Churn Risk</b> to see
+        the model's estimated probability, risk tier, and the factors the
+        prediction is most sensitive to.
       </p>
     </div>
   </div>
@@ -662,20 +805,28 @@ footer{margin-top:20px; text-align:center; color:var(--text-low); font-size:11px
       </div>
       <div class="card panel">
         <h3>Recent Predictions</h3>
-        <div id="recentWrap"><div style="color:var(--text-low); font-size:11px; text-align:center; padding:15px 0;">No predictions yet.</div></div>
+        <div id="recentWrap"><div class="empty-state">No predictions yet.</div></div>
       </div>
     </div>
   </div>
 
   <footer>
-    Model: Sequential ANN · Dense(8→8→7→8→7→1) · sigmoid output · 10 input features
+    Model: Sequential ANN · Dense(8→8→7→8→7→1) · sigmoid output · 10 input features<br>
+    {% if using_real_scaler %}
+      Predictions use your original scaler statistics for exact-match scaling.
+    {% else %}
+      Predictions are standardized using approximate bank-churn dataset statistics
+      &mdash; paste your original scaler's mean_/scale_ values into SCALER_MEANS /
+      SCALER_STDS near the top of app.py for exact-match results.
+    {% endif %}
   </footer>
 </div>
 
 <script>
+const FEATURE_KEYS = {{ features | map(attribute='key') | list | tojson }};
 const FEATURE_META = {{ features | tojson }};
 
-// Theme switching
+/* ---------------- Theme switching ---------------- */
 const themeSwitch = document.getElementById('themeSwitch');
 themeSwitch.addEventListener('click', (e) => {
   const dot = e.target.closest('.theme-dot');
@@ -685,8 +836,9 @@ themeSwitch.addEventListener('click', (e) => {
   document.body.setAttribute('data-theme', dot.dataset.t);
   document.documentElement.setAttribute('data-theme', dot.dataset.t);
 });
+document.documentElement.setAttribute('data-theme', 'midnight');
 
-// Field wiring
+/* ---------------- Field wiring ---------------- */
 FEATURE_META.forEach(f => {
   if(f.kind === 'range'){
     const el = document.getElementById('in_' + f.key);
@@ -733,41 +885,50 @@ function collectPayload(){
   return payload;
 }
 
+/* ---------------- Gauge ---------------- */
 function drawGauge(pct){
+  // semi-circle gauge, 240x150 viewbox, arc from 180deg to 0deg
   const svg = document.getElementById('gaugeSvg');
-  const cx = 120, cy = 115, r = 85;
+  const cx = 120, cy = 120, r = 92;
   const color = pct < 30 ? 'var(--ok)' : pct < 60 ? 'var(--warn)' : 'var(--bad)';
+  const startAngle = Math.PI;
   const endAngle = Math.PI - (pct/100)*Math.PI;
-  const polar = (ang) => [cx + r*Math.cos(ang), cy - r*Math.sin(ang)];
+  const polar = (ang) => [cx + r*Math.cos(ang), cy - r*Math.sin(ang)]; // note: y flips
   const trackStart = polar(Math.PI), trackEnd = polar(0);
   const valEnd = polar(endAngle);
   const largeArc = pct > 50 ? 1 : 0;
 
   svg.innerHTML = `
     <path d="M ${trackStart[0]} ${trackStart[1]} A ${r} ${r} 0 1 1 ${trackEnd[0]} ${trackEnd[1]}"
-          fill="none" stroke="rgba(120,120,140,0.18)" stroke-width="14" stroke-linecap="round"/>
+          fill="none" stroke="rgba(120,120,140,0.18)" stroke-width="16" stroke-linecap="round"/>
     <path d="M ${trackStart[0]} ${trackStart[1]} A ${r} ${r} 0 ${largeArc} 1 ${valEnd[0]} ${valEnd[1]}"
-          fill="none" stroke="${color}" stroke-width="14" stroke-linecap="round"/>
-    <circle cx="${cx}" cy="${cy}" r="4" fill="${color}"/>
+          fill="none" stroke="${color}" stroke-width="16" stroke-linecap="round"
+          style="transition: d .6s var(--ease);"/>
+    <circle cx="${cx}" cy="${cy}" r="5" fill="${color}"/>
   `;
   document.getElementById('gaugeNum').textContent = pct.toFixed(1) + '%';
   document.getElementById('gaugeNum').style.color = color;
   document.getElementById('gaugeLbl').textContent = 'churn probability';
 }
 
-document.getElementById('predictForm').addEventListener('submit', async (e) => {
+/* ---------------- Predict ---------------- */
+const form = document.getElementById('predictForm');
+form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('predictBtn');
   btn.disabled = true;
+  const payload = collectPayload();
   try{
     const res = await fetch('/api/predict', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(collectPayload())
+      body: JSON.stringify(payload)
     });
     const data = await res.json();
     renderResult(data);
     renderDashboard(data.stats);
+  } catch(err){
+    console.error(err);
   } finally {
     btn.disabled = false;
   }
@@ -782,25 +943,26 @@ function renderResult(data){
   pill.className = 'risk-pill ' + data.risk_class;
   document.getElementById('riskText').textContent = data.risk + ' Risk';
 
-  const block = document.getElementById('impactsBlock');
+  const impactsBlock = document.getElementById('impactsBlock');
   const list = document.getElementById('impactsList');
   list.innerHTML = '';
-  data.impacts.slice(0, 4).forEach(im => {
+  data.impacts.slice(0, 5).forEach(im => {
     const dir = im.delta >= 0 ? 'up' : 'down';
     const row = document.createElement('div');
     row.className = 'impact-row';
     row.innerHTML = `
       <div class="top">
         <span class="name">${im.label}</span>
-        <span class="delta">${im.delta > 0 ? '+' : ''}${im.delta.toFixed(1)} pp</span>
+        <span class="delta">${im.delta > 0 ? '+' : ''}${im.delta.toFixed(2)} pp</span>
       </div>
       <div class="impact-track"><div class="impact-fill ${dir}" style="width:${im.pct}%"></div></div>
     `;
     list.appendChild(row);
   });
-  block.style.display = 'block';
+  impactsBlock.style.display = 'block';
 }
 
+/* ---------------- Dashboard render ---------------- */
 function renderDashboard(stats){
   document.getElementById('statTotal').textContent = stats.total;
   document.getElementById('statChurn').innerHTML = stats.churn_rate + '<span>%</span>';
@@ -809,12 +971,14 @@ function renderDashboard(stats){
 
   const histRow = document.getElementById('histRow');
   const histLabels = document.getElementById('histLabels');
-  histRow.innerHTML = ''; histLabels.innerHTML = '';
+  histRow.innerHTML = '';
+  histLabels.innerHTML = '';
   const maxCount = Math.max(1, ...stats.buckets);
   stats.buckets.forEach((c, i) => {
     const bar = document.createElement('div');
     bar.className = 'hist-bar';
-    bar.style.height = Math.max(3, (c / maxCount) * 80) + 'px';
+    bar.style.height = Math.max(3, (c / maxCount) * 120) + 'px';
+    bar.title = (i*10) + '-' + (i*10+10) + '%: ' + c;
     histRow.appendChild(bar);
     const lbl = document.createElement('span');
     lbl.textContent = i % 2 === 0 ? (i*10) + '%' : '';
@@ -823,10 +987,10 @@ function renderDashboard(stats){
 
   const recentWrap = document.getElementById('recentWrap');
   if(stats.recent.length === 0){
-    recentWrap.innerHTML = '<div style="color:var(--text-low); font-size:11px; text-align:center; padding:15px 0;">No predictions yet.</div>';
+    recentWrap.innerHTML = '<div class="empty-state">No predictions yet.</div>';
     return;
   }
-  let rows = stats.recent.slice(0, 5).map(r => `
+  let rows = stats.recent.map(r => `
     <tr>
       <td>${r.ts}</td>
       <td>${(r.probability*100).toFixed(1)}%</td>
@@ -842,8 +1006,19 @@ function renderDashboard(stats){
 }
 
 document.getElementById('resetBtn').addEventListener('click', () => window.location.reload());
+
+document.getElementById('clearHistoryBtn').addEventListener('click', async () => {
+  const res = await fetch('/api/reset', {method:'POST'});
+  const stats = await res.json();
+  renderDashboard(stats);
+});
+
+/* initial empty gauge */
 drawGauge(0);
 document.getElementById('gaugeNum').textContent = '--%';
+document.getElementById('gaugeLbl').textContent = 'awaiting input';
+
+/* initial dashboard load */
 fetch('/api/stats').then(r => r.json()).then(renderDashboard);
 </script>
 </body>
